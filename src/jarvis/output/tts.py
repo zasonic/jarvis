@@ -964,6 +964,323 @@ class PiperTTS:
         return self._last_spoken_text
 
 
+class OmniVoiceTTS:
+    """TTS implementation using OmniVoice (k2-fsa) for auto-voice, voice cloning,
+    and voice design via natural-language prompts.
+
+    Output is a list of numpy arrays at 24kHz; concatenated and played via
+    sounddevice for responsive interruption (same pattern as PiperTTS).
+    """
+
+    SAMPLE_RATE = 24000  # OmniVoice fixed output sample rate
+
+    def __init__(
+        self,
+        enabled: bool = True,
+        voice: Optional[str] = None,
+        rate: Optional[int] = None,
+        device: str = "cuda",
+        ref_audio_path: Optional[str] = None,
+        instruct: Optional[str] = None,
+        num_step: int = 32,
+        speed: float = 1.0,
+    ) -> None:
+        self.enabled = enabled
+        self.voice = voice  # Not used in OmniVoice, kept for interface compatibility
+        self.rate = rate    # Not directly supported; use speed instead
+        self.device = device
+        self.ref_audio_path = ref_audio_path
+        self.instruct = instruct
+        self.num_step = num_step
+        self.speed = speed
+
+        # Threading and queue setup (same pattern as other TTS engines)
+        self._q: queue.Queue[str] = queue.Queue()
+        self._thread: Optional[threading.Thread] = None
+        self._stop = threading.Event()
+        self._is_speaking = threading.Event()
+        self._last_spoken_text: str = ""
+        self._completion_callback: Optional[Callable[[], None]] = None
+        self._duration_callback: Optional[Callable[[float], None]] = None
+        self._should_interrupt = threading.Event()
+
+        # OmniVoice model (lazy loaded)
+        self._model = None
+        self._initialized = False
+        self._init_lock = threading.Lock()
+        self._init_error: Optional[str] = None
+
+        # Audio stream for interruption
+        self._audio_stream = None
+        self._audio_lock = threading.Lock()
+
+    def _ensure_initialized(self) -> bool:
+        """Initialize OmniVoice model. Returns True if successful."""
+        if self._initialized:
+            return self._model is not None
+        if not self.enabled:
+            return False
+
+        with self._init_lock:
+            if self._initialized:
+                return self._model is not None
+
+            try:
+                import torch
+                from omnivoice import OmniVoice
+
+                # Resolve device (fall back to CPU if CUDA not available)
+                if self.device == "cuda" and not torch.cuda.is_available():
+                    print("⚠️  [TTS] CUDA requested but not available, falling back to CPU", file=sys.stderr)
+                    actual_device = "cpu"
+                else:
+                    actual_device = self.device
+
+                debug_log(f"OmniVoice TTS loading model on {actual_device}", "tts")
+                print(f"🚀 [TTS] Loading OmniVoice model on {actual_device.upper()}...", file=sys.stderr)
+
+                self._model = OmniVoice(device=actual_device)
+
+                debug_log(f"OmniVoice TTS initialized: device={actual_device}", "tts")
+                print("✅ [TTS] OmniVoice ready!", file=sys.stderr)
+
+            except ImportError as e:
+                self._init_error = f"omnivoice not installed: {e}"
+                debug_log(f"OmniVoice TTS init failed: {self._init_error}", "tts")
+                print(f"❌ [TTS] {self._init_error}", file=sys.stderr)
+            except Exception as e:
+                self._init_error = f"Failed to load OmniVoice model: {e}"
+                debug_log(f"OmniVoice TTS init failed: {self._init_error}", "tts")
+                print(f"❌ [TTS] {self._init_error}", file=sys.stderr)
+
+            self._initialized = True
+            return self._model is not None
+
+    def start(self) -> None:
+        if not self.enabled or self._thread is not None:
+            return
+        # Lazy init happens on first speak() — don't load the heavy model at startup
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        if self._thread is None:
+            return
+        try:
+            self.interrupt()
+        except Exception:
+            pass
+        self._stop.set()
+        try:
+            self._q.put_nowait("")
+        except Exception:
+            pass
+        self._thread.join(timeout=2.0)
+        self._thread = None
+        self._stop.clear()
+
+    def speak(self, text: str, completion_callback: Optional[Callable[[], None]] = None,
+              duration_callback: Optional[Callable[[float], None]] = None) -> None:
+        if not self.enabled or not text.strip():
+            return
+        # Lazy start the worker thread
+        if self._thread is None:
+            self.start()
+        self._completion_callback = completion_callback
+        self._duration_callback = duration_callback
+        # Preprocess text for speech (convert links to readable descriptions, strip markdown)
+        processed_text = _preprocess_for_speech(text)
+        try:
+            self._q.put_nowait(processed_text)
+        except Exception:
+            pass
+
+    def interrupt(self) -> None:
+        """Stop current speech immediately."""
+        self._should_interrupt.set()
+        with self._audio_lock:
+            if self._audio_stream is not None:
+                try:
+                    self._audio_stream.abort()
+                except Exception:
+                    pass
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            try:
+                text = self._q.get(timeout=0.5)
+            except queue.Empty:
+                continue
+            if not text:
+                continue
+            try:
+                self._speak_once(text)
+            except Exception as e:
+                debug_log(f"OmniVoice TTS error in _speak_once: {e}", "tts")
+                continue
+
+    def _speak_once(self, text: str) -> None:
+        self._is_speaking.set()
+        self._last_spoken_text = text
+        self._should_interrupt.clear()
+        interrupted = False
+
+        # Signal speaking state to face widget
+        self._notify_speaking_state(True)
+
+        try:
+            # Lazy initialization on first use
+            if not self._ensure_initialized():
+                if self._init_error:
+                    print(f"  ⚠️ OmniVoice TTS: {self._init_error}", flush=True)
+                return
+
+            import torch
+            import sounddevice as sd
+            import numpy as np
+
+            start_time = time.time()
+            debug_log(f"OmniVoice TTS starting synthesis: {len(text.split())} words", "tts")
+
+            # Check for interruption before synthesis
+            if self._should_interrupt.is_set():
+                debug_log("OmniVoice TTS interrupted before synthesis", "tts")
+                return
+
+            # Generate audio. OmniVoice returns a list of numpy arrays at 24kHz.
+            try:
+                with torch.no_grad():
+                    audio_chunks = self._model.generate(
+                        text=text,
+                        ref_audio=self.ref_audio_path,
+                        instruct=self.instruct,
+                        num_step=self.num_step,
+                        speed=self.speed,
+                    )
+            except torch.cuda.OutOfMemoryError as oom:
+                debug_log(f"OmniVoice TTS OOM during generation: {oom}", "tts")
+                print(f"  ⚠️ OmniVoice TTS out of GPU memory; skipping utterance", flush=True)
+                try:
+                    torch.cuda.empty_cache()
+                except Exception:
+                    pass
+                return
+
+            # Check for interruption after synthesis
+            if self._should_interrupt.is_set():
+                debug_log("OmniVoice TTS interrupted after synthesis", "tts")
+                return
+
+            if not audio_chunks:
+                debug_log("OmniVoice TTS: no audio chunks generated", "tts")
+                return
+
+            full_audio = np.concatenate(audio_chunks).astype(np.float32)
+
+            if len(full_audio) == 0:
+                debug_log("OmniVoice TTS: no audio generated", "tts")
+                return
+
+            # Calculate exact duration from actual samples
+            exact_duration = len(full_audio) / self.SAMPLE_RATE
+            debug_log(f"OmniVoice TTS synthesis complete: {exact_duration:.2f}s, {len(full_audio)} samples", "tts")
+
+            # Notify listener of exact duration for precise echo detection
+            if self._duration_callback is not None:
+                try:
+                    self._duration_callback(exact_duration)
+                except Exception as e:
+                    debug_log(f"OmniVoice TTS duration callback error: {e}", "tts")
+
+            # Stream playback for responsive interruption (same pattern as PiperTTS)
+            play_position = [0]
+            blocksize = 1024
+
+            def audio_callback(outdata, frames, time_info, status):
+                if self._should_interrupt.is_set():
+                    raise sd.CallbackAbort()
+
+                start = play_position[0]
+                end = start + frames
+                chunk = full_audio[start:end]
+
+                if len(chunk) < frames:
+                    outdata[:len(chunk), 0] = chunk
+                    outdata[len(chunk):, 0] = 0
+                    raise sd.CallbackStop()
+                else:
+                    outdata[:, 0] = chunk
+
+                play_position[0] = end
+
+            with self._audio_lock:
+                self._audio_stream = sd.OutputStream(
+                    samplerate=self.SAMPLE_RATE,
+                    channels=1,
+                    dtype='float32',
+                    blocksize=blocksize,
+                    callback=audio_callback,
+                )
+                self._audio_stream.start()
+
+            # Wait for playback to complete
+            try:
+                while self._audio_stream is not None and self._audio_stream.active:
+                    if self._should_interrupt.is_set():
+                        interrupted = True
+                        with self._audio_lock:
+                            if self._audio_stream is not None:
+                                self._audio_stream.abort()
+                        break
+                    time.sleep(0.05)
+            finally:
+                with self._audio_lock:
+                    if self._audio_stream is not None:
+                        try:
+                            self._audio_stream.close()
+                        except Exception:
+                            pass
+                        self._audio_stream = None
+
+            actual_duration = time.time() - start_time
+            debug_log(f"OmniVoice TTS complete: actual={actual_duration:.2f}s (audio={exact_duration:.2f}s)", "tts")
+
+        except Exception as e:
+            debug_log(f"OmniVoice TTS error: {e}", "tts")
+            print(f"  ⚠️ OmniVoice TTS error: {e}", flush=True)
+        finally:
+            self._is_speaking.clear()
+            self._notify_speaking_state(False)
+
+            # Call completion callback if set and not interrupted
+            if self._completion_callback is not None and not interrupted:
+                try:
+                    self._completion_callback()
+                except Exception as e:
+                    print(f"  ⚠️ OmniVoice TTS completion callback error: {e}", flush=True)
+                self._completion_callback = None
+
+    def _notify_speaking_state(self, is_speaking: bool) -> None:
+        """Notify the face widget of speaking state changes."""
+        try:
+            from desktop_app.face_widget import get_jarvis_state, JarvisState
+            state_manager = get_jarvis_state()
+            if is_speaking:
+                debug_log("setting face state to SPEAKING (omnivoice)", "tts")
+                state_manager.set_state(JarvisState.SPEAKING)
+        except ImportError:
+            debug_log("face widget not available (ImportError) (omnivoice)", "tts")
+        except Exception as e:
+            debug_log(f"failed to set face state to SPEAKING (omnivoice): {e}", "tts")
+
+    # Loopback guard helpers (same interface as the other engines)
+    def is_speaking(self) -> bool:
+        return self._is_speaking.is_set()
+
+    def get_last_spoken_text(self) -> str:
+        return self._last_spoken_text
+
+
 def create_tts_engine(
     engine: str = "piper",
     enabled: bool = True,
@@ -981,14 +1298,22 @@ def create_tts_engine(
     piper_noise_scale: float = 0.667,
     piper_noise_w: float = 0.8,
     piper_sentence_silence: float = 0.2,
+    # OmniVoice parameters
+    omnivoice_device: str = "cuda",
+    omnivoice_ref_audio: Optional[str] = None,
+    omnivoice_instruct: Optional[str] = None,
+    omnivoice_num_step: int = 32,
+    omnivoice_speed: float = 1.0,
 ):
     """Factory function to create the appropriate TTS engine.
 
     Supported engines:
     - "piper" (default): Neural TTS with auto-download, exact duration tracking
     - "chatterbox": AI voice with emotion control (requires PyTorch)
+    - "omnivoice": Auto-voice / voice cloning / voice design via natural-language prompt
     """
-    if engine.lower() == "chatterbox":
+    engine_lower = engine.lower()
+    if engine_lower == "chatterbox":
         return ChatterboxTTS(
             enabled=enabled,
             voice=voice,
@@ -997,6 +1322,17 @@ def create_tts_engine(
             audio_prompt_path=audio_prompt_path,
             exaggeration=exaggeration,
             cfg_weight=cfg_weight,
+        )
+    elif engine_lower == "omnivoice":
+        return OmniVoiceTTS(
+            enabled=enabled,
+            voice=voice,
+            rate=rate,
+            device=omnivoice_device,
+            ref_audio_path=omnivoice_ref_audio,
+            instruct=omnivoice_instruct,
+            num_step=omnivoice_num_step,
+            speed=omnivoice_speed,
         )
     else:
         # Default to Piper TTS
