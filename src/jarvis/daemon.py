@@ -458,6 +458,12 @@ def main() -> None:
         piper_noise_scale=cfg.tts_piper_noise_scale,
         piper_noise_w=cfg.tts_piper_noise_w,
         piper_sentence_silence=cfg.tts_piper_sentence_silence,
+        # OmniVoice parameters
+        omnivoice_device=cfg.tts_omnivoice_device,
+        omnivoice_ref_audio=cfg.tts_omnivoice_ref_audio,
+        omnivoice_instruct=cfg.tts_omnivoice_instruct,
+        omnivoice_num_step=cfg.tts_omnivoice_num_step,
+        omnivoice_speed=cfg.tts_omnivoice_speed,
     )
     _global_tts_engine = tts  # Expose for face widget speaking animation
     if tts.enabled:
