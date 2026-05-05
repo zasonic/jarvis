@@ -3,6 +3,7 @@ import json
 import re
 import time
 import threading
+from collections import OrderedDict
 from datetime import datetime, timezone
 from typing import Iterator, Optional, List, Tuple, Union, Callable
 from .db import Database
@@ -640,7 +641,14 @@ class DialogueMemory:
         # inspect entry age, but reads are NOT bounded by RECENT_WINDOW_SEC
         # any more — long active conversations would otherwise see warm
         # profile / router caches expire while the session is still going.
-        self._hot_cache: dict[str, Tuple[float, object]] = {}
+        # LRU-bounded so per-query keys (router cache, enrichment extractor
+        # cache) cannot grow without limit during long active sessions.
+        # Reads bump recency; writes evict the least-recently-used entry
+        # once the cap is reached. ``WARM_PROFILE_CACHE_KEY`` is a single
+        # query-agnostic entry so the cap easily covers it; explicit
+        # invalidation hooks (``clear_hot_cache``, ``invalidate_warm_profile``,
+        # new-conversation reset) still apply unchanged.
+        self._hot_cache: "OrderedDict[str, Tuple[float, object]]" = OrderedDict()
         # Hard ceiling on stored tool turns. With the default
         # ``tool_carryover_max_turns=2`` re-injected per reply, 16 lets a
         # session accumulate roughly 8x the visible budget before the
@@ -783,10 +791,19 @@ class DialogueMemory:
     # and the graph-mutation invalidator agree on it.
     WARM_PROFILE_CACHE_KEY = "warm_profile_block"
 
+    # LRU cap for the conversation-scoped scratch cache. The engine writes
+    # at most three keys per turn (router, enrichment extractor, warm
+    # profile) of which two are query-dependent, so 128 covers ~64 unique
+    # queries per active session — well above any realistic hot window
+    # while keeping memory growth bounded for marathon sessions.
+    HOT_CACHE_MAX_ENTRIES = 128
+
     def hot_cache_get(self, key: str) -> Optional[object]:
         """Return the cached value for ``key`` if present, else ``None``.
 
-        No age-based expiry: callers control invalidation via
+        Reads bump the entry to the most-recently-used end so the LRU
+        eviction policy reflects access patterns, not just insertion
+        order. No age-based expiry: callers control invalidation via
         ``clear_hot_cache``, ``invalidate_warm_profile``, or new-
         conversation reset in the engine.
         """
@@ -794,18 +811,27 @@ class DialogueMemory:
             entry = self._hot_cache.get(key)
             if not entry:
                 return None
+            self._hot_cache.move_to_end(key)
             _ts, value = entry
             return value
 
     def hot_cache_put(self, key: str, value: object) -> None:
-        """Store value under key with current timestamp."""
+        """Store value under key with current timestamp.
+
+        Evicts the least-recently-used entry once ``HOT_CACHE_MAX_ENTRIES``
+        is exceeded so per-query keys (router/enrichment caches) cannot
+        grow without bound during long sessions.
+        """
         with self._lock:
             self._hot_cache[key] = (time.time(), value)
+            self._hot_cache.move_to_end(key)
+            while len(self._hot_cache) > self.HOT_CACHE_MAX_ENTRIES:
+                self._hot_cache.popitem(last=False)
 
     def clear_hot_cache(self) -> None:
         """Drop all conversation-scoped cache entries."""
         with self._lock:
-            self._hot_cache = {}
+            self._hot_cache = OrderedDict()
 
     def invalidate_warm_profile(self) -> None:
         """Drop the cached warm-profile block. Called from the graph
@@ -898,16 +924,35 @@ class DialogueMemory:
     def get_pending_chunks(self) -> List[str]:
         """Get unsaved messages as formatted chunks for diary update.
 
-        Returns messages that haven't been saved to diary yet (timestamp > _last_saved_timestamp).
-        Thread-safe.
+        Returns messages that haven't been saved to diary yet
+        (timestamp > _last_saved_timestamp). Thread-safe.
+
+        For diary flush callers that need an atomic snapshot timestamp,
+        use ``get_pending_chunks_with_snapshot()`` instead — this method
+        discards the snapshot and is intended for display/notification
+        purposes only.
+        """
+        chunks, _ = self.get_pending_chunks_with_snapshot()
+        return chunks
+
+    def get_pending_chunks_with_snapshot(self) -> Tuple[List[str], float]:
+        """Return (pending_chunks, snapshot_timestamp) atomically.
+
+        The snapshot is ``_last_ts`` — the highest timestamp assigned by
+        ``_next_ts`` so far. Because ``_next_ts`` is strictly monotonic,
+        every ``add_message`` call after this lock is released will produce
+        a timestamp strictly greater than the snapshot. Callers should pass
+        the returned snapshot to ``mark_saved_up_to`` rather than computing
+        their own ``time.time()`` snapshot, which can collide with ``_next_ts``
+        on low-resolution clocks (Windows ~16ms tick).
         """
         with self._lock:
-            # Get messages that haven't been saved yet
             unsaved_messages = [
                 (ts, role, content) for ts, role, content in self._messages
                 if ts > self._last_saved_timestamp
             ]
-            return [f"{role.title()}: {content}" for _, role, content in unsaved_messages]
+            chunks = [f"{role.title()}: {content}" for _, role, content in unsaved_messages]
+            return chunks, self._last_ts
 
     def has_pending_chunks(self) -> bool:
         """Check if there are unsaved messages. Thread-safe."""
@@ -1530,13 +1575,19 @@ def update_diary_from_dialogue_memory(
         return None
 
     try:
-        # CRITICAL: Capture the current timestamp BEFORE getting chunks
-        # This ensures that any new messages arriving during LLM summarization
-        # (which can take 30-45 seconds) won't be incorrectly marked as saved.
-        snapshot_timestamp = time.time()
-
-        # Get pending chunks from dialogue memory
-        pending_chunks = dialogue_memory.get_pending_chunks()
+        # Atomically capture pending chunks AND the snapshot timestamp.
+        # Using ``_last_ts`` (via get_pending_chunks_with_snapshot) rather
+        # than a bare ``time.time()`` call guarantees that the snapshot is
+        # strictly before any future ``add_message`` call, regardless of
+        # OS clock granularity. On Windows ``time.time()`` has ~16ms
+        # resolution, so a separate ``time.time()`` snapshot and the
+        # ``_next_ts`` call inside a concurrent ``add_message`` can both
+        # land on the same tick, producing identical timestamps. The new
+        # message then fails the ``ts > snapshot`` test in
+        # ``get_pending_chunks`` and is wrongly treated as already saved.
+        pending_chunks, snapshot_timestamp = (
+            dialogue_memory.get_pending_chunks_with_snapshot()
+        )
         debug_log(f"diary update: got {len(pending_chunks)} pending chunks from dialogue_memory", "memory")
 
         if not pending_chunks:
