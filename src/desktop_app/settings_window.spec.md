@@ -52,16 +52,17 @@ The settings window uses a sidebar navigation pattern: a fixed-width `QListWidge
 2. Text-to-Speech
 3. Piper TTS
 4. Chatterbox TTS
-5. Voice Input (includes microphone device selection)
-6. Wake Word
-7. Speech Recognition (Whisper)
-8. Voice Activity Detection
-9. Timing & Windows
-10. Memory & Dialogue
-11. Location
-12. Features (includes Dictation Mode toggle and hotkey)
-13. MCP Servers
-14. Advanced
+5. Sesame CSM TTS
+6. Voice Input (includes microphone device selection)
+7. Wake Word
+8. Speech Recognition (Whisper)
+9. Voice Activity Detection
+10. Timing & Windows
+11. Memory & Dialogue
+12. Location
+13. Features (includes Dictation Mode toggle and hotkey)
+14. MCP Servers
+15. Advanced
 
 ## Hardware Device Selection
 

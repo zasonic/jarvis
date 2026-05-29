@@ -607,6 +607,264 @@ class ChatterboxTTS:
         return self._last_spoken_text
 
 
+# Path to the vendored Sesame CSM reference repo (generator.py, models.py, ...).
+# CSM is not pip-installable, so it is vendored under third_party/csm and added
+# to sys.path lazily (never globally) right before importing the generator.
+_CSM_VENDOR_DIR = Path(__file__).resolve().parents[3] / "third_party" / "csm"
+
+
+class SesameCSMTTS:
+    """TTS implementation using Sesame AI's CSM-1B conversational speech model.
+
+    CSM produces highly natural, human-sounding speech. The model is heavy and
+    GPU-bound, so it is loaded once (lazily, on first speak) and reused. This
+    engine mirrors the ChatterboxTTS contract exactly: a worker thread drains a
+    queue, exact audio duration is reported via duration_callback for echo
+    detection, completion_callback fires when playback finishes naturally, and
+    barge-in interruption stops playback immediately.
+    """
+
+    def __init__(self, enabled: bool = True, voice: Optional[str] = None, rate: Optional[int] = None,
+                 device: str = "cuda", speaker: int = 0,
+                 max_audio_length_ms: int = 30000) -> None:
+        self.enabled = enabled
+        self.voice = voice  # Not used by CSM, kept for interface compatibility
+        self.rate = rate    # Not used by CSM, kept for interface compatibility
+        self.device = device
+        self.speaker = speaker
+        self.max_audio_length_ms = max_audio_length_ms
+
+        # Threading and queue setup (same as the other engines)
+        self._q: queue.Queue[str] = queue.Queue()
+        self._thread: Optional[threading.Thread] = None
+        self._stop = threading.Event()
+        self._is_speaking = threading.Event()
+        self._last_spoken_text: str = ""
+        self._completion_callback: Optional[Callable[[], None]] = None
+        self._duration_callback: Optional[Callable[[float], None]] = None
+        self._should_interrupt = threading.Event()
+
+        # CSM generator (lazily loaded on first speak)
+        self._generator = None
+        self._model_error: Optional[str] = None
+        self._initialized = False
+        self._init_lock = threading.Lock()
+
+    def _initialize_with_logging(self) -> None:
+        """Load the CSM-1B generator with emoji status logging."""
+        print("🔧 [TTS] Initializing Sesame CSM neural voice synthesis...", file=sys.stderr)
+
+        try:
+            print("📦 [TTS] Loading CSM dependencies...", file=sys.stderr)
+
+            import torch
+            import torchaudio  # noqa: F401  (validated here, imported again at playback)
+
+            # Make the vendored CSM repo importable without polluting sys.path globally.
+            vendor_dir = str(_CSM_VENDOR_DIR)
+            if vendor_dir not in sys.path:
+                sys.path.insert(0, vendor_dir)
+
+            from generator import load_csm_1b
+
+            # Honour the requested device, falling back to CPU if CUDA is absent.
+            if self.device == "cpu":
+                actual_device = "cpu"
+            else:
+                actual_device = "cuda" if torch.cuda.is_available() else "cpu"
+                if self.device == "cuda" and actual_device == "cpu":
+                    print("⚠️  [TTS] CUDA requested but not available, falling back to CPU", file=sys.stderr)
+
+            print(f"🚀 [TTS] Loading CSM-1B model on {actual_device.upper()}...", file=sys.stderr)
+
+            self._generator = load_csm_1b(device=actual_device)
+
+            debug_log(f"Sesame CSM TTS initialized on {actual_device}, "
+                      f"sample_rate={getattr(self._generator, 'sample_rate', '?')}", "tts")
+            print("✅ [TTS] Sesame CSM neural voice synthesis ready!", file=sys.stderr)
+
+        except ImportError as e:
+            self._model_error = f"Sesame CSM dependencies not available: {e}"
+            print(f"❌ [TTS] Missing dependencies: {self._model_error}", file=sys.stderr)
+            warnings.warn(f"SesameCSMTTS initialization failed: {self._model_error}")
+        except Exception as e:
+            self._model_error = f"Failed to load CSM-1B model: {e}"
+            print(f"❌ [TTS] Model loading failed: {self._model_error}", file=sys.stderr)
+            warnings.warn(f"SesameCSMTTS initialization failed: {self._model_error}")
+
+    def _ensure_initialized(self) -> None:
+        """Initialize heavy dependencies only once, when actually needed."""
+        if self._initialized or not self.enabled:
+            return
+        with self._init_lock:
+            if self._initialized:
+                return
+            self._initialize_with_logging()
+            self._initialized = True
+
+    def _ensure_model(self) -> bool:
+        """Return True if the CSM generator is loaded and ready."""
+        self._ensure_initialized()
+        return self._generator is not None
+
+    def start(self) -> None:
+        if not self.enabled or self._thread is not None:
+            return
+        self._ensure_initialized()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        if self._thread is None:
+            return
+        try:
+            self.interrupt()
+        except Exception:
+            pass
+        self._stop.set()
+        try:
+            self._q.put_nowait("")
+        except Exception:
+            pass
+        self._thread.join(timeout=2.0)
+        self._thread = None
+        self._stop.clear()
+
+    def speak(self, text: str, completion_callback: Optional[Callable[[], None]] = None,
+              duration_callback: Optional[Callable[[float], None]] = None) -> None:
+        if not self.enabled or not text.strip():
+            return
+        if self._thread is None:
+            self.start()
+        self._completion_callback = completion_callback
+        self._duration_callback = duration_callback
+        # Preprocess text for speech (convert links to readable descriptions, strip markdown)
+        processed_text = _preprocess_for_speech(text)
+        try:
+            self._q.put_nowait(processed_text)
+        except Exception:
+            pass
+
+    def interrupt(self) -> None:
+        """Stop current speech immediately."""
+        self._should_interrupt.set()
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            try:
+                text = self._q.get(timeout=0.5)
+            except queue.Empty:
+                continue
+            if not text:
+                continue
+            try:
+                self._speak_once(text)
+            except Exception:
+                continue
+
+    def _speak_once(self, text: str) -> None:
+        self._is_speaking.set()
+        self._last_spoken_text = text
+        self._should_interrupt.clear()
+        interrupted = False
+
+        # Signal speaking state to face widget
+        self._notify_speaking_state(True)
+
+        try:
+            if not self._ensure_model():
+                warnings.warn("Sesame CSM TTS not available, skipping speech synthesis")
+                return
+
+            import tempfile
+            import os
+            import pygame
+            import torchaudio
+
+            # Generate speech with CSM. context stays empty for now; speaker and
+            # max audio length are configurable.
+            audio = self._generator.generate(
+                text=text,
+                speaker=self.speaker,
+                context=[],
+                max_audio_length_ms=self.max_audio_length_ms,
+            )
+
+            sample_rate = self._generator.sample_rate
+
+            # Exact duration from the generated samples for precise echo detection
+            exact_duration = audio.shape[-1] / sample_rate
+            debug_log(f"Sesame CSM TTS synthesis complete: {exact_duration:.2f}s", "tts")
+
+            if self._duration_callback is not None:
+                try:
+                    self._duration_callback(exact_duration)
+                except Exception as e:
+                    debug_log(f"Sesame CSM TTS duration callback error: {e}", "tts")
+
+            # Save the generated audio to a temporary WAV. CSM returns a 1-D
+            # tensor, so unsqueeze to [1, N] and move to CPU before saving.
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp_file:
+                tmp_path = tmp_file.name
+
+            try:
+                torchaudio.save(tmp_path, audio.unsqueeze(0).cpu(), sample_rate)
+
+                # Play audio synchronously via pygame, waiting until it finishes
+                pygame.mixer.init(frequency=sample_rate, size=-16, channels=1, buffer=1024)
+                pygame.mixer.music.load(tmp_path)
+                pygame.mixer.music.play()
+
+                while pygame.mixer.music.get_busy():
+                    if self._should_interrupt.is_set():
+                        pygame.mixer.music.stop()
+                        interrupted = True
+                        break
+                    pygame.time.wait(100)  # Check every 100ms
+
+            finally:
+                try:
+                    pygame.mixer.quit()
+                except Exception:
+                    pass
+                try:
+                    os.unlink(tmp_path)
+                except Exception:
+                    pass
+
+        except Exception as e:
+            warnings.warn(f"Sesame CSM TTS error: {e}")
+        finally:
+            self._is_speaking.clear()
+            self._notify_speaking_state(False)
+            if self._completion_callback is not None and not interrupted:
+                try:
+                    self._completion_callback()
+                except Exception:
+                    pass
+                self._completion_callback = None
+
+    def _notify_speaking_state(self, is_speaking: bool) -> None:
+        """Notify the face widget of speaking state changes (best-effort)."""
+        try:
+            from desktop_app.face_widget import get_jarvis_state, JarvisState
+            state_manager = get_jarvis_state()
+            if is_speaking:
+                debug_log("setting face state to SPEAKING (csm)", "tts")
+                state_manager.set_state(JarvisState.SPEAKING)
+        except ImportError:
+            debug_log("face widget not available (ImportError) (csm)", "tts")
+        except Exception as e:
+            debug_log(f"failed to set face state to SPEAKING (csm): {e}", "tts")
+
+    # Loopback guard helpers (same interface as TextToSpeech)
+    def is_speaking(self) -> bool:
+        return self._is_speaking.is_set()
+
+    def get_last_spoken_text(self) -> str:
+        return self._last_spoken_text
+
+
 class PiperTTS:
     """TTS implementation using Piper (local neural TTS with exact duration).
 
@@ -1304,6 +1562,10 @@ def create_tts_engine(
     omnivoice_instruct: Optional[str] = None,
     omnivoice_num_step: int = 32,
     omnivoice_speed: float = 1.0,
+    # Sesame CSM parameters
+    csm_device: str = "cuda",
+    csm_speaker: int = 0,
+    csm_max_audio_length_ms: int = 30000,
 ):
     """Factory function to create the appropriate TTS engine.
 
@@ -1311,6 +1573,7 @@ def create_tts_engine(
     - "piper" (default): Neural TTS with auto-download, exact duration tracking
     - "chatterbox": AI voice with emotion control (requires PyTorch)
     - "omnivoice": Auto-voice / voice cloning / voice design via natural-language prompt
+    - "csm": Sesame CSM-1B conversational speech model (requires PyTorch + GPU)
     """
     engine_lower = engine.lower()
     if engine_lower == "chatterbox":
@@ -1333,6 +1596,15 @@ def create_tts_engine(
             instruct=omnivoice_instruct,
             num_step=omnivoice_num_step,
             speed=omnivoice_speed,
+        )
+    elif engine_lower == "csm":
+        return SesameCSMTTS(
+            enabled=enabled,
+            voice=voice,
+            rate=rate,
+            device=csm_device,
+            speaker=csm_speaker,
+            max_audio_length_ms=csm_max_audio_length_ms,
         )
     else:
         # Default to Piper TTS

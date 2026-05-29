@@ -119,6 +119,11 @@ class Settings:
     tts_omnivoice_num_step: int  # Diffusion sampling steps (default 32)
     tts_omnivoice_speed: float  # Playback speed multiplier (default 1.0)
 
+    # Sesame CSM TTS
+    tts_csm_device: str  # "cuda", "auto", or "cpu" for CSM-1B
+    tts_csm_speaker: int  # Speaker ID passed to CSM generate()
+    tts_csm_max_audio_length_ms: int  # Max audio length per utterance in ms
+
     # Voice Input & Audio
     voice_device: str | None
     sample_rate: int
@@ -430,6 +435,11 @@ def get_default_config() -> Dict[str, Any]:
         "tts_omnivoice_num_step": 32,  # Diffusion sampling steps (higher = better quality, slower)
         "tts_omnivoice_speed": 1.0,  # Playback speed multiplier (1.0 = normal)
 
+        # Sesame CSM TTS
+        "tts_csm_device": "cuda",  # "cuda" (recommended), "auto", or "cpu"
+        "tts_csm_speaker": 0,  # Speaker ID passed to CSM generate()
+        "tts_csm_max_audio_length_ms": 30000,  # Max audio length per utterance in ms
+
         # Voice Input & Audio
         "voice_device": None,
         "sample_rate": 16000,
@@ -607,7 +617,7 @@ def load_settings() -> Settings:
     active_profiles = _ensure_list(merged.get("active_profiles"))
     tts_enabled = bool(merged.get("tts_enabled", True))
     tts_engine = str(merged.get("tts_engine", "piper")).lower()
-    if tts_engine not in ("piper", "chatterbox", "omnivoice"):
+    if tts_engine not in ("piper", "chatterbox", "omnivoice", "csm"):
         tts_engine = "piper"  # Default to piper if invalid value
     tts_voice_val = merged.get("tts_voice")
     tts_voice = None if tts_voice_val in (None, "", "null") else str(tts_voice_val)
@@ -653,6 +663,19 @@ def load_settings() -> Settings:
         tts_omnivoice_speed = float(merged.get("tts_omnivoice_speed", 1.0))
     except (TypeError, ValueError):
         tts_omnivoice_speed = 1.0
+
+    # Sesame CSM TTS settings
+    tts_csm_device = str(merged.get("tts_csm_device", "cuda")).lower()
+    if tts_csm_device not in ("cuda", "auto", "cpu"):
+        tts_csm_device = "cuda"  # Default to cuda if invalid value
+    try:
+        tts_csm_speaker = int(merged.get("tts_csm_speaker", 0))
+    except (TypeError, ValueError):
+        tts_csm_speaker = 0
+    try:
+        tts_csm_max_audio_length_ms = int(merged.get("tts_csm_max_audio_length_ms", 30000))
+    except (TypeError, ValueError):
+        tts_csm_max_audio_length_ms = 30000
 
     voice_device_val = merged.get("voice_device")
     voice_device = None if voice_device_val in (None, "", "default", "system") else str(voice_device_val)
@@ -815,6 +838,11 @@ def load_settings() -> Settings:
         tts_omnivoice_instruct=tts_omnivoice_instruct,
         tts_omnivoice_num_step=tts_omnivoice_num_step,
         tts_omnivoice_speed=tts_omnivoice_speed,
+
+        # Sesame CSM TTS
+        tts_csm_device=tts_csm_device,
+        tts_csm_speaker=tts_csm_speaker,
+        tts_csm_max_audio_length_ms=tts_csm_max_audio_length_ms,
 
         # Voice Input & Audio
         voice_device=voice_device,

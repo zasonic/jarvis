@@ -25,6 +25,22 @@ piper-tts>=1.3.0
 pygame>=2.1.0
 faiss-cpu>=1.7.4
 
+# Sesame CSM-1B TTS (OPTIONAL engine: set tts_engine="csm").
+# CSM itself is not pip-installable; the reference repo is vendored under
+# third_party/csm. The deps below are heavy and GPU-bound, so they are left
+# commented out: install them only if you actually use the CSM engine.
+# torch/torchaudio already arrive with chatterbox-tts above.
+#   IMPORTANT (GPU): RTX 50-series (Blackwell, sm_120) needs a CUDA 12.8 / cu128
+#   PyTorch build, e.g.
+#     pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu128
+#   IMPORTANT (models): CSM-1B and its Llama-3.2 backbone are gated on
+#   HuggingFace. Run `huggingface-cli login` and accept both model licences,
+#   otherwise load_csm_1b() fails (the engine logs the error and Jarvis
+#   continues without speech).
+# moshi>=0.2.2
+# torchtune>=0.4.0
+# torchao>=0.9.0
+
 # NVIDIA CUDA libraries for GPU-accelerated speech recognition on Windows
 nvidia-cublas-cu12>=12.8.0; sys_platform == "win32"
 nvidia-cudnn-cu12>=9.0.0; sys_platform == "win32"
