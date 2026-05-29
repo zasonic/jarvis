@@ -58,6 +58,7 @@ CATEGORIES = [
     ("tts", "🔊 Text-to-Speech"),
     ("piper", "🎵 Piper TTS"),
     ("chatterbox", "🎭 Chatterbox TTS"),
+    ("csm", "💬 Sesame CSM TTS"),
     ("voice_input", "🎤 Voice Input"),
     ("wake", "👂 Wake Word"),
     ("whisper", "🗣️ Speech Recognition"),
@@ -130,7 +131,8 @@ def _build_field_metadata() -> List[FieldMeta]:
     f("tts_enabled", "Enable TTS", "Enable text-to-speech output",
       "tts", "bool")
     f("tts_engine", "TTS Engine", "Speech synthesis engine",
-      "tts", "choice", choices=[("piper", "Piper (Neural)"), ("chatterbox", "Chatterbox (Voice Cloning)")])
+      "tts", "choice", choices=[("piper", "Piper (Neural)"), ("chatterbox", "Chatterbox (Voice Cloning)"),
+                                ("csm", "Sesame CSM (Conversational)")])
     f("tts_rate", "Speech Rate", "Words per minute (200 = normal)",
       "tts", "int", min_val=80, max_val=400, step=10, suffix="WPM", nullable=True)
 
@@ -168,6 +170,21 @@ def _build_field_metadata() -> List[FieldMeta]:
     f("tts_chatterbox_audio_prompt", "Voice Clone Audio",
       "Path to audio file for voice cloning (leave empty to disable)",
       "chatterbox", "str", nullable=True)
+
+    # --- Sesame CSM TTS ---
+    f("tts_csm_device", "Device",
+      "Compute device for CSM-1B",
+      "csm", "choice",
+      choices=[("cuda", "CUDA (GPU)"), ("auto", "Auto"), ("cpu", "CPU")])
+    f("tts_csm_speaker", "Speaker ID",
+      "Speaker index passed to CSM",
+      "csm", "int", min_val=0, max_val=99)
+    f("tts_csm_max_audio_length_ms", "Max Audio Length",
+      "Maximum audio length per utterance",
+      "csm", "int", min_val=1000, max_val=120000, step=1000, suffix="ms")
+    f("tts_csm_context_turns", "Context Turns",
+      "Prior assistant turns fed back for prosody continuity (0 disables)",
+      "csm", "int", min_val=0, max_val=10)
 
     # --- Voice Input ---
     f("voice_device", "Input Device",

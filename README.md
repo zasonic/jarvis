@@ -336,6 +336,18 @@ Voice cloning with Chatterbox - add a 3-10 second .wav sample:
 }
 ```
 
+**Sesame CSM** - conversational speech model for the most human-sounding voice (requires running from source, a CUDA GPU, and gated HuggingFace model access):
+```json
+{
+  "tts_engine": "csm",
+  "tts_csm_device": "cuda",
+  "tts_csm_speaker": 0,
+  "tts_csm_max_audio_length_ms": 30000,
+  "tts_csm_context_turns": 3
+}
+```
+CSM is vendored under `third_party/csm`. Before first use, run `huggingface-cli login` and accept the CSM-1B and Llama-3.2 model licences. RTX 50-series GPUs (Blackwell) need a CUDA 12.8 / cu128 PyTorch build. If the model cannot load, Jarvis logs the error and continues without speech. `tts_csm_context_turns` feeds recent replies back to CSM so its voice keeps consistent prosody across the conversation (set to 0 to synthesise each reply independently).
+
 </details>
 
 <details>
@@ -535,7 +547,7 @@ pwsh -ExecutionPolicy Bypass -File scripts\run_windows.ps1
 bash scripts/run_linux.sh
 ```
 
-Running from source enables Chatterbox TTS (AI voice with emotion/cloning). Piper TTS works in both bundled and source modes.
+Running from source enables Chatterbox TTS (AI voice with emotion/cloning) and Sesame CSM TTS (conversational, most human-sounding). Piper TTS works in both bundled and source modes.
 
 </details>
 

@@ -473,6 +473,11 @@ def main() -> None:
         omnivoice_instruct=cfg.tts_omnivoice_instruct,
         omnivoice_num_step=cfg.tts_omnivoice_num_step,
         omnivoice_speed=cfg.tts_omnivoice_speed,
+        # Sesame CSM parameters
+        csm_device=cfg.tts_csm_device,
+        csm_speaker=cfg.tts_csm_speaker,
+        csm_max_audio_length_ms=cfg.tts_csm_max_audio_length_ms,
+        csm_context_turns=cfg.tts_csm_context_turns,
     )
     _global_tts_engine = tts  # Expose for face widget speaking animation
     if tts.enabled:
