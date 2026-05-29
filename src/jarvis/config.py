@@ -123,6 +123,7 @@ class Settings:
     tts_csm_device: str  # "cuda", "auto", or "cpu" for CSM-1B
     tts_csm_speaker: int  # Speaker ID passed to CSM generate()
     tts_csm_max_audio_length_ms: int  # Max audio length per utterance in ms
+    tts_csm_context_turns: int  # Prior assistant turns fed back as CSM context (0 disables)
 
     # Voice Input & Audio
     voice_device: str | None
@@ -439,6 +440,7 @@ def get_default_config() -> Dict[str, Any]:
         "tts_csm_device": "cuda",  # "cuda" (recommended), "auto", or "cpu"
         "tts_csm_speaker": 0,  # Speaker ID passed to CSM generate()
         "tts_csm_max_audio_length_ms": 30000,  # Max audio length per utterance in ms
+        "tts_csm_context_turns": 3,  # Prior assistant turns fed back as CSM context (0 disables)
 
         # Voice Input & Audio
         "voice_device": None,
@@ -676,6 +678,10 @@ def load_settings() -> Settings:
         tts_csm_max_audio_length_ms = int(merged.get("tts_csm_max_audio_length_ms", 30000))
     except (TypeError, ValueError):
         tts_csm_max_audio_length_ms = 30000
+    try:
+        tts_csm_context_turns = max(0, int(merged.get("tts_csm_context_turns", 3)))
+    except (TypeError, ValueError):
+        tts_csm_context_turns = 3
 
     voice_device_val = merged.get("voice_device")
     voice_device = None if voice_device_val in (None, "", "default", "system") else str(voice_device_val)
@@ -843,6 +849,7 @@ def load_settings() -> Settings:
         tts_csm_device=tts_csm_device,
         tts_csm_speaker=tts_csm_speaker,
         tts_csm_max_audio_length_ms=tts_csm_max_audio_length_ms,
+        tts_csm_context_turns=tts_csm_context_turns,
 
         # Voice Input & Audio
         voice_device=voice_device,

@@ -182,6 +182,9 @@ def _build_field_metadata() -> List[FieldMeta]:
     f("tts_csm_max_audio_length_ms", "Max Audio Length",
       "Maximum audio length per utterance",
       "csm", "int", min_val=1000, max_val=120000, step=1000, suffix="ms")
+    f("tts_csm_context_turns", "Context Turns",
+      "Prior assistant turns fed back for prosody continuity (0 disables)",
+      "csm", "int", min_val=0, max_val=10)
 
     # --- Voice Input ---
     f("voice_device", "Input Device",

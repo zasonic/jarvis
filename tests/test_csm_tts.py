@@ -235,6 +235,95 @@ class TestSesameCSMTTSSynthesis:
         assert tts.is_speaking() is False
 
 
+class TestSesameCSMTTSContext:
+    """Conversational context (prior turns) wiring for prosody continuity."""
+
+    def _engine(self, context_turns):
+        from src.jarvis.output.tts import SesameCSMTTS
+
+        tts = SesameCSMTTS(enabled=True, context_turns=context_turns)
+        gen = MagicMock()
+        gen.sample_rate = 24000
+        counter = {"n": 0}
+
+        def _gen(**kwargs):
+            counter["n"] += 1
+            a = _FakeAudio(24000)
+            a.tag = counter["n"]
+            return a
+
+        gen.generate.side_effect = _gen
+        tts._generator = gen
+        tts._initialized = True
+        return tts, gen
+
+    def _stubs(self):
+        fake_pygame = MagicMock()
+        fake_pygame.mixer.music.get_busy.return_value = False
+        return {"pygame": fake_pygame, "torchaudio": MagicMock()}
+
+    def test_first_utterance_has_empty_context(self):
+        tts, gen = self._engine(3)
+        with patch.dict(sys.modules, self._stubs()):
+            tts._speak_once("First")
+        assert gen.generate.call_args_list[0].kwargs["context"] == []
+
+    def test_second_utterance_includes_prior_turn(self):
+        tts, gen = self._engine(3)
+        with patch.dict(sys.modules, self._stubs()):
+            tts._speak_once("First")
+            tts._speak_once("Second")
+        ctx = gen.generate.call_args_list[1].kwargs["context"]
+        assert len(ctx) == 1
+        assert ctx[0].text == "First"
+        assert ctx[0].speaker == tts.speaker
+        assert ctx[0].audio.tag == 1  # the first turn's generated audio
+
+    def test_context_capped_at_context_turns(self):
+        tts, gen = self._engine(1)
+        with patch.dict(sys.modules, self._stubs()):
+            tts._speak_once("One")
+            tts._speak_once("Two")
+            tts._speak_once("Three")
+        ctx = gen.generate.call_args_list[2].kwargs["context"]
+        assert len(ctx) == 1
+        assert ctx[0].text == "Two"  # only the single most recent prior turn
+
+    def test_context_disabled_when_turns_zero(self):
+        tts, gen = self._engine(0)
+        with patch.dict(sys.modules, self._stubs()):
+            tts._speak_once("One")
+            tts._speak_once("Two")
+        for call in gen.generate.call_args_list:
+            assert call.kwargs["context"] == []
+
+    def test_context_overflow_falls_back_to_empty(self):
+        from src.jarvis.output.tts import SesameCSMTTS, _CSMSegment
+
+        tts = SesameCSMTTS(enabled=True, context_turns=3)
+        # Pre-seed history so the first generate() attempt carries context.
+        tts._context.append(_CSMSegment(speaker=0, text="prev", audio=_FakeAudio(10)))
+        gen = MagicMock()
+        gen.sample_rate = 24000
+        seen = []
+
+        def _gen(**kwargs):
+            seen.append(list(kwargs["context"]))
+            if len(seen) == 1:
+                raise ValueError("Inputs too long, must be below max_seq_len - max_generation_len: 123")
+            return _FakeAudio(24000)
+
+        gen.generate.side_effect = _gen
+        tts._generator = gen
+        tts._initialized = True
+        with patch.dict(sys.modules, self._stubs()):
+            tts._speak_once("Hello")
+        assert len(seen) == 2          # retried after overflow
+        assert seen[0] != []           # first attempt carried context
+        assert seen[1] == []           # retry dropped context
+        assert tts.is_speaking() is False
+
+
 class TestSesameCSMTTSFactory:
     def test_creates_csm_engine(self):
         from src.jarvis.output.tts import create_tts_engine, SesameCSMTTS
@@ -257,11 +346,13 @@ class TestSesameCSMTTSFactory:
             csm_device="cpu",
             csm_speaker=2,
             csm_max_audio_length_ms=20000,
+            csm_context_turns=5,
         )
         assert isinstance(tts, SesameCSMTTS)
         assert tts.device == "cpu"
         assert tts.speaker == 2
         assert tts.max_audio_length_ms == 20000
+        assert tts.context_turns == 5
 
     def test_other_engines_unaffected(self):
         from src.jarvis.output.tts import create_tts_engine, PiperTTS, ChatterboxTTS
@@ -276,7 +367,8 @@ class TestSesameCSMTTSConfig:
         import inspect
 
         params = set(inspect.signature(Settings).parameters.keys())
-        for f in ("tts_csm_device", "tts_csm_speaker", "tts_csm_max_audio_length_ms"):
+        for f in ("tts_csm_device", "tts_csm_speaker", "tts_csm_max_audio_length_ms",
+                  "tts_csm_context_turns"):
             assert f in params, f"missing settings field: {f}"
 
     def test_default_config_has_csm_values(self):
@@ -286,6 +378,7 @@ class TestSesameCSMTTSConfig:
         assert defaults["tts_csm_device"] == "cuda"
         assert defaults["tts_csm_speaker"] == 0
         assert defaults["tts_csm_max_audio_length_ms"] == 30000
+        assert defaults["tts_csm_context_turns"] == 3
 
     def test_csm_engine_preserved(self):
         from src.jarvis.config import load_settings
@@ -309,12 +402,22 @@ class TestSesameCSMTTSConfig:
         config_data = {
             "tts_csm_speaker": "abc",
             "tts_csm_max_audio_length_ms": "xyz",
+            "tts_csm_context_turns": "nope",
             "_config_version": 1,
         }
         with patch("src.jarvis.config._load_json", return_value=config_data):
             settings = load_settings()
             assert settings.tts_csm_speaker == 0
             assert settings.tts_csm_max_audio_length_ms == 30000
+            assert settings.tts_csm_context_turns == 3
+
+    def test_negative_context_turns_clamped_to_zero(self):
+        from src.jarvis.config import load_settings
+
+        config_data = {"tts_csm_context_turns": -5, "_config_version": 1}
+        with patch("src.jarvis.config._load_json", return_value=config_data):
+            settings = load_settings()
+            assert settings.tts_csm_context_turns == 0
 
 
 class TestSesameCSMTTSThreadSafety:

@@ -38,6 +38,7 @@
   "tts_csm_device": "cuda",
   "tts_csm_speaker": 0,
   "tts_csm_max_audio_length_ms": 30000,
+  "tts_csm_context_turns": 3,
   "voice_device": null,
   "sample_rate": 16000,
   "voice_min_energy": 0.02,

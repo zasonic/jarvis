@@ -11,6 +11,8 @@ import re
 import sys
 import time
 import warnings
+from collections import deque
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Callable
 from urllib.parse import urlparse
@@ -613,6 +615,19 @@ class ChatterboxTTS:
 _CSM_VENDOR_DIR = Path(__file__).resolve().parents[3] / "third_party" / "csm"
 
 
+@dataclass
+class _CSMSegment:
+    """Duck-typed stand-in for CSM's Segment (speaker, text, audio).
+
+    CSM's tokeniser only reads these three attributes, so we avoid importing
+    the torch-dependent Segment class. ``audio`` is a 1-D tensor at the model's
+    sample rate (24 kHz), kept on CPU between turns to spare VRAM.
+    """
+    speaker: int
+    text: str
+    audio: object
+
+
 class SesameCSMTTS:
     """TTS implementation using Sesame AI's CSM-1B conversational speech model.
 
@@ -626,13 +641,19 @@ class SesameCSMTTS:
 
     def __init__(self, enabled: bool = True, voice: Optional[str] = None, rate: Optional[int] = None,
                  device: str = "cuda", speaker: int = 0,
-                 max_audio_length_ms: int = 30000) -> None:
+                 max_audio_length_ms: int = 30000, context_turns: int = 3) -> None:
         self.enabled = enabled
         self.voice = voice  # Not used by CSM, kept for interface compatibility
         self.rate = rate    # Not used by CSM, kept for interface compatibility
         self.device = device
         self.speaker = speaker
         self.max_audio_length_ms = max_audio_length_ms
+        # Number of prior assistant turns fed back as CSM context for prosody
+        # continuity. 0 disables context (each utterance synthesised cold).
+        self.context_turns = max(0, context_turns)
+        # Recent (text, audio) turns produced by this engine, mutated only on
+        # the single worker thread in _speak_once (no lock needed).
+        self._context: deque = deque(maxlen=self.context_turns)
 
         # Threading and queue setup (same as the other engines)
         self._q: queue.Queue[str] = queue.Queue()
@@ -781,14 +802,28 @@ class SesameCSMTTS:
             import pygame
             import torchaudio
 
-            # Generate speech with CSM. context stays empty for now; speaker and
-            # max audio length are configurable.
-            audio = self._generator.generate(
-                text=text,
-                speaker=self.speaker,
-                context=[],
-                max_audio_length_ms=self.max_audio_length_ms,
-            )
+            # Generate speech with CSM, feeding recent assistant turns as
+            # context so the voice keeps consistent prosody across the
+            # conversation. speaker and max audio length are configurable.
+            context = list(self._context)
+            try:
+                audio = self._generator.generate(
+                    text=text,
+                    speaker=self.speaker,
+                    context=context,
+                    max_audio_length_ms=self.max_audio_length_ms,
+                )
+            except ValueError as ve:
+                # CSM raises ValueError when the context overflows its sequence
+                # budget. Fail open: drop the history and retry without context.
+                debug_log(f"Sesame CSM TTS context overflow, retrying without context: {ve}", "tts")
+                self._context.clear()
+                audio = self._generator.generate(
+                    text=text,
+                    speaker=self.speaker,
+                    context=[],
+                    max_audio_length_ms=self.max_audio_length_ms,
+                )
 
             sample_rate = self._generator.sample_rate
 
@@ -801,6 +836,16 @@ class SesameCSMTTS:
                     self._duration_callback(exact_duration)
                 except Exception as e:
                     debug_log(f"Sesame CSM TTS duration callback error: {e}", "tts")
+
+            # Record this turn so the next utterance can use it as context.
+            # The full audio is generated regardless of playback interruption,
+            # so it is valid history either way. Kept on CPU to spare VRAM.
+            if self.context_turns > 0:
+                try:
+                    stored_audio = audio.detach().cpu() if hasattr(audio, "detach") else audio
+                    self._context.append(_CSMSegment(speaker=self.speaker, text=text, audio=stored_audio))
+                except Exception as e:
+                    debug_log(f"Sesame CSM TTS failed to record context segment: {e}", "tts")
 
             # Save the generated audio to a temporary WAV. CSM returns a 1-D
             # tensor, so unsqueeze to [1, N] and move to CPU before saving.
@@ -1566,6 +1611,7 @@ def create_tts_engine(
     csm_device: str = "cuda",
     csm_speaker: int = 0,
     csm_max_audio_length_ms: int = 30000,
+    csm_context_turns: int = 3,
 ):
     """Factory function to create the appropriate TTS engine.
 
@@ -1605,6 +1651,7 @@ def create_tts_engine(
             device=csm_device,
             speaker=csm_speaker,
             max_audio_length_ms=csm_max_audio_length_ms,
+            context_turns=csm_context_turns,
         )
     else:
         # Default to Piper TTS
