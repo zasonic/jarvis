@@ -4,7 +4,13 @@ requests==2.32.3
 beautifulsoup4>=4.12.0
 lxml>=4.9.0
 html2text>=2020.1.16
-playwright>=1.40.0
+# Optional: JavaScript-rendering / anti-bot page fetch.
+# The built-in fetchWebPage / webSearch are pure-requests by default. To let
+# them escalate to a headless browser for SPA or Cloudflare-protected pages,
+# install Scrapling separately (it manages its own pinned Playwright) and set
+# scrapling_fetch_enabled: true in config:
+#   pip install "scrapling[fetchers]>=0.4.8" && scrapling install
+# For the full crawling toolset over MCP instead, use: pip install "scrapling[ai]"
 numpy<2.0.0
 faster-whisper==1.0.3
 setuptools<81

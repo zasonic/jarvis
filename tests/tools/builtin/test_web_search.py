@@ -1160,3 +1160,52 @@ class TestLanguagePlumbingEndToEnd:
         assert "self._last_detected_language: Optional[str] = None" in src
         assert src.count("self._last_detected_language = detected") >= 2
         assert "language=self._last_detected_language" in src
+
+
+class TestCascadeScraplingEscalation:
+    """The opt-in Scrapling escalation inside the fetch cascade."""
+
+    def _cfg(self, enabled):
+        from types import SimpleNamespace
+        return SimpleNamespace(
+            scrapling_fetch_enabled=enabled,
+            scrapling_binary="scrapling",
+            scrapling_solve_cloudflare=False,
+        )
+
+    @patch("src.jarvis.tools.builtin.web_search._fetch_page_content", return_value=None)
+    def test_no_escalation_when_disabled(self, _mock_fetch):
+        """Flag off: the cascade returns None and never touches Scrapling."""
+        from src.jarvis.tools.builtin import web_search as ws
+        candidates = [("Title", "https://example.com")]
+        with patch("src.jarvis.tools.builtin.scrapling_fetch.scrapling_fetch") as spf:
+            out = ws._cascade_fetch(candidates, query="bieber tour", cfg=self._cfg(False))
+        assert out is None
+        spf.assert_not_called()
+
+    @patch("src.jarvis.tools.builtin.web_search._fetch_page_content", return_value=None)
+    def test_escalates_when_plain_cascade_empty(self, _mock_fetch):
+        """Flag on + plain cascade empty: Scrapling rescues the result."""
+        from src.jarvis.tools.builtin import web_search as ws
+        candidates = [("Title", "https://example.com")]
+        # Returned extract must share a query token to pass the relevance filter.
+        with patch(
+            "src.jarvis.tools.builtin.scrapling_fetch.scrapling_fetch",
+            return_value="Justin Bieber announced a new tour today.",
+        ) as spf:
+            out = ws._cascade_fetch(candidates, query="bieber tour", cfg=self._cfg(True))
+        assert out is not None
+        assert "Bieber" in out
+        spf.assert_called()
+
+    @patch("src.jarvis.tools.builtin.web_search._fetch_page_content", return_value=None)
+    def test_escalation_extract_failing_relevance_is_dropped(self, _mock_fetch):
+        """A Scrapling extract with zero query overlap is still rejected."""
+        from src.jarvis.tools.builtin import web_search as ws
+        candidates = [("Title", "https://example.com")]
+        with patch(
+            "src.jarvis.tools.builtin.scrapling_fetch.scrapling_fetch",
+            return_value="Cookie preferences accept reject manage settings.",
+        ):
+            out = ws._cascade_fetch(candidates, query="bieber tour", cfg=self._cfg(True))
+        assert out is None

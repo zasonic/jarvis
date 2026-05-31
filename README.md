@@ -166,6 +166,7 @@ Jarvis starts listening automatically — just say "Jarvis" and talk!
 - **Adaptive Tone** - Automatically surgical for code, pragmatic for business, encouraging for wellbeing — no manual mode switching
 - **Smart Tool Selection** - Embedding-based relevance filtering picks only the tools needed per query — add unlimited MCP tools without performance degradation
 - **Built-in Tools** - Screenshot OCR, web search (DuckDuckGo → Brave → Wikipedia fallback chain with auto-fetch), weather, file access, nutrition tracking, location awareness, plus a tool-discovery escape hatch the agent uses to widen its own toolset mid-reply
+- **JavaScript & Anti-Bot Pages (optional)** - When a normal fetch comes back empty (single-page apps, Cloudflare-protected sites), Jarvis can escalate to a locally-installed [Scrapling](https://github.com/D4Vinci/Scrapling) browser. Runs on your machine, off by default; see [Configuration](#configuration)
 - **Knowledge Graph Memory** - Self-organising memory that learns from conversations, auto-splits by topic, and surfaces relevant knowledge automatically
 - **Natural Voice** - Say "Jarvis" anywhere in your sentence, interrupt with "stop", follow up without repeating the wake word
 - **Dictation Mode** - Free, offline alternative to WisprFlow — hold a hotkey, speak, release to paste text into any app
@@ -265,6 +266,39 @@ Both digest passes auto-enable for small models (≤7B) and stay off for large m
 ```
 
 Field logs show `🧩 Memory digest: …` and `🧩 Tool digest: …` lines when a pass ran, so you can see when the substrate was replaced.
+
+</details>
+
+<details>
+<summary><strong>JavaScript & anti-bot page fetch (Scrapling)</strong></summary>
+
+The built-in page fetch and web search are plain HTTP by default: fast, local,
+and dependency-free, but blind to JavaScript-rendered pages and blocked by
+anti-bot walls. When you opt in, Jarvis escalates to a locally-installed
+[Scrapling](https://github.com/D4Vinci/Scrapling) browser (it renders the page,
+bypasses Cloudflare, and returns clean Markdown) only when a normal fetch comes
+back empty or blocked. Everything runs on your machine; nothing is sent to a
+third-party service.
+
+Install Scrapling (it manages its own browser), then enable it:
+
+```bash
+pip install "scrapling[fetchers]>=0.4.8"
+scrapling install
+```
+
+```json
+{
+  "scrapling_fetch_enabled": true,        // off by default
+  "scrapling_binary": "scrapling",        // path if not on PATH
+  "scrapling_solve_cloudflare": false     // attempt Cloudflare challenges (slower)
+}
+```
+
+Browser rendering is slower than a plain fetch, so this stays off the fast path
+unless you turn it on. For the full crawling/bulk toolset (sessions, spiders,
+screenshots), add the Scrapling MCP server instead (see
+[MCP Integrations](#mcp-integrations)).
 
 </details>
 
@@ -404,6 +438,33 @@ See [full MCP setup guide](#mcp-integrations) below.
 </details>
 
 ## MCP Integrations
+
+<details>
+<summary><strong>Scrapling</strong> - Web scraping, crawling, anti-bot bypass</summary>
+
+The full Scrapling toolset (single + bulk fetch, browser sessions, screenshots,
+spiders) over MCP. Runs locally; complements the lighter opt-in escalation
+built into `fetchWebPage` (see [Configuration](#configuration)).
+
+```bash
+pip install "scrapling[ai]>=0.4.8"
+scrapling install
+```
+
+```json
+{
+  "mcps": {
+    "scrapling": {
+      "command": "scrapling",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+"Jarvis, scrape the top posts from that forum" / "read this Cloudflare-protected page" / "grab every product title from this listing"
+
+</details>
 
 <details>
 <summary><strong>Home Assistant</strong> - Smart home voice control</summary>

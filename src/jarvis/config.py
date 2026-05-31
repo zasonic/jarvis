@@ -258,6 +258,17 @@ class Settings:
     # no account) and language-aware via the Whisper-detected utterance
     # language.
     wikipedia_fallback_enabled: bool
+    # Optional escalation to a locally-installed Scrapling CLI when a plain
+    # `requests` fetch returns empty/blocked content (JS-rendered SPAs,
+    # anti-bot walls). Off by default: it spawns a heavy headless browser and
+    # only helps when Scrapling is installed, so it must never touch the
+    # privacy/offline/latency-sensitive fast path unless the user opts in.
+    scrapling_fetch_enabled: bool
+    # Path (or bare name on $PATH) of the `scrapling` CLI used for escalation.
+    scrapling_binary: str
+    # When escalating, allow the stealth fetcher to solve Cloudflare
+    # challenges. Slower and more conspicuous, so off by default.
+    scrapling_solve_cloudflare: bool
 
     # Dictation (hold-to-dictate)
     dictation_enabled: bool
@@ -557,6 +568,11 @@ def get_default_config() -> Dict[str, Any]:
         "web_search_enabled": True,
         "brave_search_api_key": "",
         "wikipedia_fallback_enabled": True,
+        # Optional Scrapling escalation for JS/anti-bot pages. Off by default:
+        # requires a local Scrapling install and a headless browser.
+        "scrapling_fetch_enabled": False,
+        "scrapling_binary": "scrapling",
+        "scrapling_solve_cloudflare": False,
 
         # Dictation (hold-to-dictate, WisprFlow-like)
         "dictation_enabled": True,
@@ -781,6 +797,9 @@ def load_settings() -> Settings:
     web_search_enabled = bool(merged.get("web_search_enabled", True))
     brave_search_api_key = str(merged.get("brave_search_api_key", "") or "").strip()
     wikipedia_fallback_enabled = bool(merged.get("wikipedia_fallback_enabled", True))
+    scrapling_fetch_enabled = bool(merged.get("scrapling_fetch_enabled", False))
+    scrapling_binary = str(merged.get("scrapling_binary", "scrapling") or "scrapling").strip()
+    scrapling_solve_cloudflare = bool(merged.get("scrapling_solve_cloudflare", False))
     dictation_enabled = bool(merged.get("dictation_enabled", True))
     dictation_hotkey = str(merged.get("dictation_hotkey", _default_dictation_hotkey())).strip()
     dictation_filler_removal = bool(merged.get("dictation_filler_removal", False))
@@ -929,6 +948,9 @@ def load_settings() -> Settings:
         web_search_enabled=web_search_enabled,
         brave_search_api_key=brave_search_api_key,
         wikipedia_fallback_enabled=wikipedia_fallback_enabled,
+        scrapling_fetch_enabled=scrapling_fetch_enabled,
+        scrapling_binary=scrapling_binary,
+        scrapling_solve_cloudflare=scrapling_solve_cloudflare,
 
         # Dictation
         dictation_enabled=dictation_enabled,

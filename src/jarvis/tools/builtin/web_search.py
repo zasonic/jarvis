@@ -206,9 +206,52 @@ def _score_extract_against_query(extract: str, query_tokens: set) -> int:
     return len(query_tokens & extract_tokens)
 
 
+def _scrapling_cascade(candidates: List[Tuple[str, str]],
+                       query_tokens: set,
+                       cfg,
+                       deadline: Optional[float],
+                       ) -> Optional[str]:
+    """Opt-in last resort: retry the candidates through Scrapling.
+
+    Runs only when the plain cascade returned nothing usable AND the user has
+    enabled ``scrapling_fetch_enabled``. Walks the candidates in rank order,
+    escalating each through Scrapling's browser/stealth ladder, and returns the
+    first extract that passes the same zero-overlap relevance filter the plain
+    cascade uses. Bounded by ``deadline`` so the chain ceiling still holds.
+    """
+    if cfg is None or not getattr(cfg, "scrapling_fetch_enabled", False):
+        return None
+    # Lazy import avoids a circular import: scrapling_fetch imports
+    # ``_is_public_url`` from this module at import time.
+    from .scrapling_fetch import scrapling_fetch
+
+    for rank, (_title, url) in enumerate(candidates):
+        content = scrapling_fetch(url, cfg=cfg, deadline=deadline)
+        if not content:
+            continue
+        if query_tokens and _score_extract_against_query(content, query_tokens) == 0:
+            debug_log(
+                f"Scrapling extract for result #{rank + 1} shared 0 query "
+                f"tokens; skipping as boilerplate",
+                "web",
+            )
+            continue
+        if len(content) > 1500:
+            content = content[:1500] + "..."
+        debug_log(
+            f"Scrapling escalation rescued result #{rank + 1} "
+            f"({len(content)} chars)",
+            "web",
+        )
+        return content
+    return None
+
+
 def _cascade_fetch(candidates: List[Tuple[str, str]],
                    wall_clock_sec: float = _CASCADE_WALL_CLOCK_SEC,
                    query: Optional[str] = None,
+                   cfg=None,
+                   deadline: Optional[float] = None,
                    ) -> Optional[str]:
     """Fetch the top candidates in parallel under a shared wall-clock cap.
 
@@ -223,7 +266,9 @@ def _cascade_fetch(candidates: List[Tuple[str, str]],
 
     Returns ``None`` when no candidate passes (1), so the caller emits the
     links-only envelope instead of handing the synthesis model a payload
-    it can't ground an answer in.
+    it can't ground an answer in — unless the user has enabled the optional
+    Scrapling escalation, in which case a browser-rendered retry is attempted
+    (within ``deadline``) before giving up.
     """
     if not candidates:
         return None
@@ -282,7 +327,9 @@ def _cascade_fetch(candidates: List[Tuple[str, str]],
                 f"Fetched {len(content)} chars from result #{rank + 1}", "web",
             )
         return content
-    return None
+    # Plain cascade found nothing usable. Try the opt-in Scrapling escalation
+    # before surrendering to the links-only envelope.
+    return _scrapling_cascade(candidates, query_tokens, cfg, deadline)
 
 
 def _brave_search(query: str, api_key: str, count: int = 5
@@ -739,6 +786,8 @@ class WebSearchTool(Tool):
                     result_urls[:3],
                     wall_clock_sec=min(_CASCADE_WALL_CLOCK_SEC, _budget_left()),
                     query=search_query,
+                    cfg=getattr(context, "cfg", None),
+                    deadline=chain_deadline,
                 )
 
             # Fallback chain: DDG failed to give us a usable answer (either
@@ -777,6 +826,8 @@ class WebSearchTool(Tool):
                                 _CASCADE_WALL_CLOCK_SEC, _budget_left()
                             ),
                             query=search_query,
+                            cfg=cfg,
+                            deadline=chain_deadline,
                         )
                         if fetched_content:
                             used_source = "brave"

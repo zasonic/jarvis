@@ -5,6 +5,14 @@ from typing import Dict, Any, Optional
 from ...debug import debug_log
 from ..base import Tool, ToolContext
 from ..types import ToolExecutionResult
+from .scrapling_fetch import scrapling_fetch
+
+
+# Below this many characters the plain-requests extract is treated as the
+# empty-SPA / blocked signature and, if the user has opted in, retried through
+# Scrapling. Generous enough that a genuinely short page is not pointlessly
+# re-fetched, tight enough to catch a JavaScript shell that rendered to nothing.
+_THIN_CONTENT_CHARS = 200
 
 
 class FetchWebPageTool(Tool):
@@ -28,6 +36,29 @@ class FetchWebPageTool(Tool):
             },
             "required": ["url"]
         }
+
+    def _escalate(self, url: str, context: ToolContext) -> Optional[ToolExecutionResult]:
+        """Retry ``url`` through Scrapling when the user has opted in.
+
+        Returns a success result wrapping the escalated Markdown, or ``None``
+        when escalation is disabled, unavailable, or yields nothing — in which
+        case the caller keeps its existing behaviour (thin content or failure).
+        """
+        cfg = getattr(context, "cfg", None)
+        markdown = scrapling_fetch(
+            url, cfg=cfg, user_print=getattr(context, "user_print", None),
+        )
+        if not markdown:
+            return None
+        reply_text = f"**URL:** {url}\n\n**Content:**\n{markdown}"
+        max_chars = 50_000
+        if len(reply_text) > max_chars:
+            reply_text = f"[Truncated to {max_chars} chars]\n\n" + reply_text[:max_chars]
+        debug_log(
+            f"fetchWebPage: scrapling escalation returned {len(markdown)} chars",
+            "web",
+        )
+        return ToolExecutionResult(success=True, reply_text=reply_text)
 
     def run(self, args: Optional[Dict[str, Any]], context: ToolContext) -> ToolExecutionResult:
         """Fetch and extract content from a web page."""
@@ -78,6 +109,14 @@ class FetchWebPageTool(Tool):
                         unique_lines.append(line)
                         seen_lines.add(line)
                 content = '\n'.join(unique_lines[:500])
+                # A near-empty extract is the signature of a JavaScript shell
+                # or an anti-bot page that returned bytes but no readable text.
+                # Escalate to Scrapling when the user has opted in; otherwise
+                # keep the thin content (unchanged default behaviour).
+                if len(content.strip()) < _THIN_CONTENT_CHARS:
+                    escalated = self._escalate(url, context)
+                    if escalated is not None:
+                        return escalated
                 links_section = ""
                 if include_links:
                     links = []
@@ -115,6 +154,12 @@ class FetchWebPageTool(Tool):
                 return ToolExecutionResult(success=True, reply_text=reply_text)
         except requests.exceptions.RequestException as e:
             debug_log(f"fetchWebPage: request failed: {e}", "web")
+            # A hard transport/HTTP failure (timeout, 403, blocked) is exactly
+            # the case Scrapling's stealth ladder exists for; try it before
+            # admitting defeat (no-op unless the user opted in).
+            escalated = self._escalate(url, context)
+            if escalated is not None:
+                return escalated
             context.user_print("⚠️ Failed to fetch page.")
             return ToolExecutionResult(success=False, reply_text=f"Failed to fetch page: {e}")
         except Exception as e:  # pragma: no cover (safety net)

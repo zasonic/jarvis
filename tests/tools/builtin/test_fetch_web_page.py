@@ -28,6 +28,10 @@ class TestFetchWebPageTool:
         self.tool = FetchWebPageTool()
         self.context = Mock(spec=ToolContext)
         self.context.user_print = Mock()
+        # Scrapling escalation is opt-in; keep it OFF for the default-behaviour
+        # tests so they never spawn a subprocess or hit the network. The
+        # escalation-specific tests below flip it on explicitly.
+        self.context.cfg = Mock(scrapling_fetch_enabled=False)
 
     def test_tool_properties(self):
         """Test tool metadata properties."""
@@ -154,3 +158,70 @@ class TestFetchWebPageTool:
         # relative link should be resolved to absolute
         assert "https://example.com/relative" in result.reply_text
         assert "absolute.test" in result.reply_text
+
+
+class TestFetchWebPageScraplingEscalation:
+    """The opt-in Scrapling fallback for JS-heavy / blocked pages."""
+
+    def setup_method(self):
+        self.tool = FetchWebPageTool()
+        self.context = Mock(spec=ToolContext)
+        self.context.user_print = Mock()
+        self.context.cfg = Mock(scrapling_fetch_enabled=True)
+
+    @patch('requests.get')
+    @patch('src.jarvis.tools.builtin.fetch_web_page.scrapling_fetch')
+    def test_thin_content_triggers_escalation(self, mock_scrapling, mock_get):
+        """A near-empty extract (JS shell) escalates and returns Scrapling's text."""
+        html = '<html><head><title>App</title></head><body><div id="root"></div></body></html>'
+        mock_get.return_value = _make_response_mock(
+            status_code=200, text=html, content=html.encode(), raise_for_status=Mock(),
+        )
+        mock_scrapling.return_value = "# Rendered\n\nReal article body from the SPA."
+
+        result = self.tool.run({"url": "https://spa.example"}, self.context)
+
+        assert result.success is True
+        assert "Real article body" in result.reply_text
+        mock_scrapling.assert_called_once()
+        assert mock_scrapling.call_args.kwargs.get("cfg") is self.context.cfg
+
+    @patch('requests.get')
+    @patch('src.jarvis.tools.builtin.fetch_web_page.scrapling_fetch')
+    def test_request_failure_triggers_escalation(self, mock_scrapling, mock_get):
+        """A transport failure escalates instead of immediately failing."""
+        mock_get.side_effect = requests.exceptions.RequestException("blocked")
+        mock_scrapling.return_value = "Recovered content via stealth fetch."
+
+        result = self.tool.run({"url": "https://blocked.example"}, self.context)
+
+        assert result.success is True
+        assert "Recovered content" in result.reply_text
+        mock_scrapling.assert_called_once()
+
+    @patch('requests.get')
+    @patch('src.jarvis.tools.builtin.fetch_web_page.scrapling_fetch')
+    def test_escalation_declined_keeps_failure(self, mock_scrapling, mock_get):
+        """When Scrapling yields nothing, the original failure stands."""
+        mock_get.side_effect = requests.exceptions.RequestException("blocked")
+        mock_scrapling.return_value = None
+
+        result = self.tool.run({"url": "https://blocked.example"}, self.context)
+
+        assert result.success is False
+        assert "Failed to fetch page" in result.reply_text
+
+    @patch('requests.get')
+    @patch('src.jarvis.tools.builtin.fetch_web_page.scrapling_fetch')
+    def test_rich_content_does_not_escalate(self, mock_scrapling, mock_get):
+        """A page that already yields plenty of text must not spawn Scrapling."""
+        body = "<p>" + " ".join(f"sentence number {i} here." for i in range(60)) + "</p>"
+        html = f'<html><head><title>Rich</title></head><body>{body}</body></html>'
+        mock_get.return_value = _make_response_mock(
+            status_code=200, text=html, content=html.encode(), raise_for_status=Mock(),
+        )
+
+        result = self.tool.run({"url": "https://rich.example"}, self.context)
+
+        assert result.success is True
+        mock_scrapling.assert_not_called()

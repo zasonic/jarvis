@@ -67,6 +67,18 @@ CATALOGUE: List[MCPEntry] = [
         category="automation",
     ),
     MCPEntry(
+        name="scrapling",
+        display_name="🕷️ Scrapling Web Scraper",
+        description="Read JavaScript-heavy and anti-bot-protected pages that the built-in "
+                    "fetch can't reach: renders pages in a local headless browser, bypasses "
+                    "Cloudflare, and returns clean Markdown. Requires a local install: "
+                    "pip install \"scrapling[ai]\" then scrapling install",
+        command="scrapling",
+        args=["mcp"],
+        wizard_featured=True,
+        category="automation",
+    ),
+    MCPEntry(
         name="youtube-transcript",
         display_name="📺 YouTube Transcripts",
         description="Extract and summarise transcripts from any YouTube video — "
