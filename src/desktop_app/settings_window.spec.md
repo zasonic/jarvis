@@ -38,6 +38,7 @@ FieldMeta (dataclass)
 | `int` (nullable) | QCheckBox + QSpinBox | Checkbox enables/disables the spinbox |
 | `float` | QDoubleSpinBox | With bounds, step, suffix |
 | `str` | QLineEdit | Placeholder if nullable |
+| `secret` | QLineEdit (password echo) | Masked input for keys/tokens; saved via the same `.text()` path as `str` |
 | `choice` | QComboBox | Pre-defined options |
 | `device` | QComboBox | Dynamically populated from sounddevice |
 | `list` | QListWidget + Add/Edit/Remove buttons | Stores as JSON array in config |
@@ -117,6 +118,16 @@ Prompts for confirmation, then removes the server from the in-memory dict.
 ### Save Behaviour
 
 On save, the `mcps` dict is written to config.json if non-empty, or removed entirely if empty. On reset, all MCPs are cleared.
+
+## Cloud Memory Backup Section
+
+The `cloud` category uses a **custom page** (`_build_cloud_page`) to present the opt-in supermemory backend in plain, non-technical language ("Cloud Memory Backup"; Supermemory only in small print). It shows:
+
+- a word-wrapped intro stating it is off by default and nothing leaves the device unless enabled;
+- the two everyday controls built from metadata and registered in `self._widgets` so the normal `_on_save` loop persists them: an on/off toggle (`supermemory_enabled`) and a masked `secret` "Account key" (`supermemory_api_key`);
+- a **Test connection** button that runs `SupermemoryCheckWorker` (a `QThread`) calling `supermemory_backend.check_connection` with the values the user just typed, and a status `QLabel` coloured via `themes.COLORS` (success/error/muted) showing "Checking…", "Connected…", or a plain failure message.
+
+The power-user fields (`supermemory_base_url`, `supermemory_container_tag`, `supermemory_mirror_writes`) live under the **Advanced** category and are metadata-driven. All cloud fields are emoji-free. The config keys are unchanged from the backend integration; only their UI presentation moved.
 
 ## Fields NOT Exposed in UI
 

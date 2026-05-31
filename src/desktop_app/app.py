@@ -1263,6 +1263,10 @@ class JarvisSystemTray:
         self.log_viewer = LogViewerWindow()
         self.log_signals = LogSignals()
         self.log_signals.new_log.connect(self.log_viewer.append_log)
+        # Surface the daemon's one-time cloud-memory connection result as a
+        # friendly, emoji-free tray notification (shown once per launch).
+        self._supermemory_notified = False
+        self.log_signals.new_log.connect(self._handle_supermemory_log)
 
         # Create memory viewer window (hidden by default)
         self.memory_viewer = MemoryViewerWindow()
@@ -1949,6 +1953,44 @@ class JarvisSystemTray:
         except Exception as e:
             debug_log(f"log reader error: {e}", "desktop")
             self.log_signals.new_log.emit(f"⚠️ Log reader error: {e}\n")
+
+    def _handle_supermemory_log(self, line: str) -> None:
+        """Show a one-time, emoji-free tray notice reflecting cloud-memory status.
+
+        Parses the structured ``__SUPERMEMORY__:`` line the daemon emits at
+        startup. Only the first occurrence per launch triggers a notification.
+        """
+        if self._supermemory_notified:
+            return
+        try:
+            from jarvis.memory.supermemory_backend import SUPERMEMORY_IPC_PREFIX
+        except Exception:
+            return
+        idx = line.find(SUPERMEMORY_IPC_PREFIX)
+        if idx < 0:
+            return
+        self._supermemory_notified = True
+        try:
+            import json
+            payload = json.loads(line[idx + len(SUPERMEMORY_IPC_PREFIX):].strip())
+        except Exception:
+            return
+        if getattr(self, "tray_icon", None) is None:
+            return
+        if payload.get("connected"):
+            self.tray_icon.showMessage(
+                "Cloud memory connected",
+                "Your memory is now backed up online.",
+                QSystemTrayIcon.MessageIcon.Information,
+                3000,
+            )
+        else:
+            self.tray_icon.showMessage(
+                "Cloud memory not connected",
+                "Couldn't connect. Check your account key in Settings.",
+                QSystemTrayIcon.MessageIcon.Warning,
+                5000,
+            )
 
     def stop_daemon(self, show_diary_dialog: bool = True) -> None:
         """Stop the Jarvis daemon.

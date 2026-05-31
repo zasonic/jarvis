@@ -50,16 +50,23 @@ supermemory has no notion of Jarvis's tree structure or its USER/DIRECTIVES/WORL
 
 `cfg` is threaded as an optional `cfg=None` kwarg from `daemon.py` → `update_diary_from_dialogue_memory` → `update_daily_conversation_summary`. The default `None` preserves every existing caller and test (no mirroring). When `cfg` is present and `cfg.supermemory_mirror_writes` is true:
 
-- the scrubbed daily summary is mirrored right after the local `upsert_conversation_summary` + embedding write;
+- the scrubbed daily summary is mirrored right after the local `upsert_conversation_summary` + embedding write; on success `mirror_diary_summary` returns `True` and the caller calls `db.mark_summary_synced(summary_id)` so the Memory Viewer can show a "Backed up" badge (backed by the nullable `synced_at` column on `conversation_summaries`);
 - each newly stored graph fact is mirrored inside the existing non-fatal graph block.
 
 Re-mirroring is safe: each `add` carries a stable `custom_id` (`jarvis-diary-{date}` for the cumulative daily summary, a content hash for facts) so a re-mirror updates one logical document rather than accumulating partial copies. SDK versions that reject `custom_id` fall back to a plain `add`.
 
-## Startup validation
+## Connection check & startup validation
 
-Because the backend fails open, a misconfiguration (missing package, wrong key, unreachable host, or an SDK whose surface differs from what we call) would otherwise present as a silent per-turn no-op. `startup_check(cfg)` is called once from `daemon.py` startup: when enabled, it makes one bounded `profile` probe and prints either `🌐 Supermemory connected: <endpoint> (container: <tag>)` or a `⚠️` warning with the error, so the problem surfaces in the console. It never raises and never blocks longer than the client's short timeout. When disabled it is silent and makes no network call.
+`check_connection(api_key, base_url="", container_tag="") -> (ok, message)` makes one bounded `profile` probe and returns a **plain-language, emoji-free** message. It is shared by:
+
+- `startup_check(cfg)`, called once from `daemon.py` startup. Because the backend fails open, a misconfiguration would otherwise be a silent per-turn no-op; the probe surfaces it. It prints (a) a developer-facing console line that keeps the house-style emoji per `CLAUDE.md` (`🌐 Supermemory connected …` / `⚠️ … not connected: …`), and (b) a structured, emoji-free `SUPERMEMORY_IPC_PREFIX` (`__SUPERMEMORY__:`) JSON line that the desktop app parses into a one-time tray notification (mirrors `DIARY_IPC_PREFIX`). Never raises; silent and network-free when disabled.
+- the settings window "Test connection" button (`SupermemoryCheckWorker`), which probes with the values the user just typed.
 
 The live smoke test `tests/test_supermemory_live.py` (skipped unless `SUPERMEMORY_API_KEY` is set) exercises the real SDK end-to-end against a throwaway container tag, which is the one thing the fail-open unit tests cannot prove.
+
+## Presentation (non-technical UX)
+
+The feature is surfaced as **"Cloud Memory Backup"** (the Supermemory brand only in small print). GUI surfaces are emoji-free; only the developer-facing daemon console keeps house-style emoji. The settings window has a dedicated, jargon-free Cloud page (toggle + masked "Account key" + Test connection); the base URL / namespace / upload-toggle live under Advanced. See `src/desktop_app/settings_window.spec.md`.
 
 ## Privacy
 

@@ -75,8 +75,8 @@ def test_disabled_reads_and_writes_are_noops():
     cfg = _cfg()
     assert sm.search_memories(cfg, "anything") == []
     assert sm.fetch_profile_facts(cfg, ["who is the user?"]) == []
-    # Writes must not raise and must do nothing.
-    assert sm.mirror_diary_summary(cfg, "summary", "topics", "2025-05-20") is None
+    # Writes must not raise and must do nothing (diary mirror reports False).
+    assert sm.mirror_diary_summary(cfg, "summary", "topics", "2025-05-20") is False
     assert sm.mirror_graph_fact(cfg, "a fact", "node") is None
 
 
@@ -262,7 +262,9 @@ def test_startup_check_warns_on_probe_failure(monkeypatch, capsys):
     cfg = _cfg(supermemory_enabled=True, supermemory_api_key="sm_bad")
     sm.startup_check(cfg)  # must not raise
     out = capsys.readouterr().out
-    assert "startup probe" in out and "401 unauthorized" in out
+    assert "not connected" in out and "401 unauthorized" in out
+    # The structured, emoji-free line is also emitted for the desktop app.
+    assert sm.SUPERMEMORY_IPC_PREFIX in out
 
 
 def test_startup_check_warns_when_package_missing(monkeypatch, capsys):
@@ -277,4 +279,59 @@ def test_startup_check_warns_when_package_missing(monkeypatch, capsys):
     monkeypatch.setattr(builtins, "__import__", no_supermemory)
     cfg = _cfg(supermemory_enabled=True, supermemory_api_key="sm_x")
     sm.startup_check(cfg)
-    assert "enabled but unavailable" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "not connected" in out and "not installed" in out
+
+
+# ── check_connection ─────────────────────────────────────────────────────────
+
+def test_check_connection_no_key():
+    ok, msg = sm.check_connection("")
+    assert ok is False and "account key" in msg.lower()
+
+
+def test_check_connection_ok(monkeypatch):
+    _install_stub(monkeypatch, _StubClient())
+    ok, msg = sm.check_connection("sm_x")
+    assert ok is True and msg == "Connected."
+
+
+def test_check_connection_bad_key(monkeypatch):
+    class _Raising(_StubClient):
+        def profile(self, **kw):
+            raise RuntimeError("401")
+    _install_stub(monkeypatch, _Raising())
+    ok, msg = sm.check_connection("sm_bad")
+    assert ok is False and "couldn't connect" in msg.lower()
+
+
+def test_check_connection_package_missing(monkeypatch):
+    monkeypatch.delitem(sys.modules, "supermemory", raising=False)
+    real_import = builtins.__import__
+
+    def no_supermemory(name, *args, **kwargs):
+        if name == "supermemory":
+            raise ImportError("nope")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", no_supermemory)
+    ok, msg = sm.check_connection("sm_x")
+    assert ok is False and "not installed" in msg.lower()
+
+
+def test_startup_check_emits_parseable_ipc_line(monkeypatch, capsys):
+    import json
+    _install_stub(monkeypatch, _StubClient())
+    cfg = _cfg(supermemory_enabled=True, supermemory_api_key="sm_x")
+    sm.startup_check(cfg)
+    out = capsys.readouterr().out
+    line = next(l for l in out.splitlines() if sm.SUPERMEMORY_IPC_PREFIX in l)
+    payload = json.loads(line.split(sm.SUPERMEMORY_IPC_PREFIX, 1)[1])
+    assert payload["connected"] is True
+    assert "endpoint" in payload and "message" in payload
+
+
+def test_mirror_diary_summary_returns_true_on_success(monkeypatch):
+    _install_stub(monkeypatch, _StubClient())
+    cfg = _cfg(supermemory_enabled=True, supermemory_api_key="sm_x")
+    assert sm.mirror_diary_summary(cfg, "a summary", "topics", "2025-05-20") is True

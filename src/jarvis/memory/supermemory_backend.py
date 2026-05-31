@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import hashlib
 from datetime import datetime, timezone
+from types import SimpleNamespace
 from typing import Any, List, Optional
 
 from ..debug import debug_log
@@ -194,19 +195,22 @@ def _add(client, *, content: str, container_tag: str, metadata: dict, custom_id:
 
 def mirror_diary_summary(
     cfg, summary: str, topics: Optional[str], date_utc: str
-) -> None:
+) -> bool:
     """Best-effort mirror of a daily diary summary to supermemory.
 
     Only the already-scrubbed summary text is sent. Failures are swallowed; the
     local diary remains the source of truth. A stable per-day ``custom_id`` keeps
     the cumulative summary as a single logical document instead of one entry per
     flush.
+
+    Returns True when the summary was successfully sent (used to mark the local
+    row as backed up), False otherwise.
     """
     if not is_enabled(cfg) or not summary or not summary.strip():
-        return
+        return False
     client = _get_client(cfg)
     if client is None:
-        return
+        return False
     try:
         metadata: dict[str, Any] = {
             "type": "diary",
@@ -223,8 +227,10 @@ def mirror_diary_summary(
             custom_id=f"jarvis-diary-{date_utc}",
         )
         debug_log(f"supermemory: mirrored diary summary for {date_utc}", "memory")
+        return True
     except Exception as e:
         debug_log(f"supermemory diary mirror failed (non-fatal): {e}", "memory")
+        return False
 
 
 def mirror_graph_fact(cfg, fact: str, node_name: str) -> None:
@@ -317,43 +323,82 @@ def fetch_profile_facts(
         return []
 
 
-# ── Startup validation ───────────────────────────────────────────────────────
+# ── Connection check & startup validation ────────────────────────────────────
+
+# Structured status line the daemon prints for the desktop app to parse into a
+# tray notification. Mirrors DIARY_IPC_PREFIX in src/desktop_app/diary_dialog.py.
+SUPERMEMORY_IPC_PREFIX = "__SUPERMEMORY__:"
+
+# Public endpoint shown when no self-host base URL is configured.
+DEFAULT_ENDPOINT = "https://api.supermemory.ai"
+
+
+def check_connection(
+    api_key: str, base_url: str = "", container_tag: str = ""
+) -> tuple[bool, str]:
+    """Probe supermemory with the given credentials. Returns ``(ok, message)``.
+
+    Messages are plain-language and emoji-free so they can be shown verbatim in
+    the GUI. Shared by the daemon startup log and the settings "Test connection"
+    button (which passes the values the user just typed). Never raises.
+    """
+    if not api_key or not str(api_key).strip():
+        return (False, "No account key set.")
+    try:
+        import supermemory  # noqa: F401  (optional dependency)
+    except ImportError:
+        return (False, "Cloud memory library not installed (pip install supermemory).")
+
+    cfg = SimpleNamespace(
+        supermemory_enabled=True,
+        supermemory_api_key=str(api_key).strip(),
+        supermemory_base_url=str(base_url or "").strip(),
+        supermemory_container_tag=str(container_tag or "").strip(),
+    )
+    client = _get_client(cfg)
+    if client is None:
+        return (False, "Couldn't start cloud memory backup.")
+    try:
+        client.profile(container_tag=_container_tag(cfg), q=None)
+        return (True, "Connected.")
+    except Exception as e:
+        return (False, f"Couldn't connect: {e}")
+
 
 def startup_check(cfg) -> None:
-    """One-time, best-effort connectivity probe logged at daemon startup.
+    """One-time connectivity probe at daemon startup.
 
-    The whole backend fails open, which means a misconfiguration (missing
-    package, wrong key, unreachable host, or an SDK whose surface differs from
-    what we call) would otherwise present as a silent no-op: every turn quietly
-    degrades to local memory with only a debug line. When supermemory is
-    enabled we make one bounded ``profile`` probe at startup so the problem
-    surfaces loudly in the console instead. Never raises; never blocks more than
-    the client's short timeout.
+    The whole backend fails open, so a misconfiguration (missing package, wrong
+    key, unreachable host, or an SDK mismatch) would otherwise present as a
+    silent no-op. When supermemory is enabled we probe once and (a) print a
+    developer-facing console line that keeps the house-style emoji per CLAUDE.md,
+    and (b) emit a structured, emoji-free ``__SUPERMEMORY__:`` line that the
+    desktop app turns into a tray notification. Never raises.
     """
     if not is_enabled(cfg):
         return
-    endpoint = getattr(cfg, "supermemory_base_url", "") or "https://api.supermemory.ai"
+    endpoint = getattr(cfg, "supermemory_base_url", "") or DEFAULT_ENDPOINT
     tag = _container_tag(cfg)
-    client = _get_client(cfg)
-    if client is None:
-        print(
-            "⚠️  Supermemory is enabled but unavailable (package not installed "
-            "or client failed to build) — using local memory only.",
-            flush=True,
-        )
-        return
-    try:
-        client.profile(container_tag=tag, q=None)
+    ok, message = check_connection(
+        getattr(cfg, "supermemory_api_key", ""),
+        getattr(cfg, "supermemory_base_url", ""),
+        getattr(cfg, "supermemory_container_tag", ""),
+    )
+
+    # Developer-facing console line (emoji per house style; only devs see it).
+    if ok:
         print(f"🌐 Supermemory connected: {endpoint} (container: {tag})", flush=True)
-    except Exception as e:
+    else:
+        print(f"⚠️  Supermemory is enabled but not connected: {message}", flush=True)
+        debug_log(f"supermemory startup probe: {message}", "memory")
+
+    # Structured line for the desktop app (emoji-free; parsed into a tray notice).
+    try:
+        import json as _json
         print(
-            f"⚠️  Supermemory is enabled but the startup probe to {endpoint} "
-            f"failed: {e}",
+            SUPERMEMORY_IPC_PREFIX
+            + _json.dumps({"connected": ok, "endpoint": endpoint, "message": message}),
             flush=True,
         )
-        print(
-            "   Falling back to local memory. Check supermemory_api_key and "
-            "supermemory_base_url.",
-            flush=True,
-        )
-        debug_log(f"supermemory startup probe failed: {e}", "memory")
+    except Exception:
+        pass

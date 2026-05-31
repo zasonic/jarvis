@@ -1270,10 +1270,12 @@ def update_daily_conversation_summary(
 
         # Mirror the scrubbed summary to the opt-in supermemory backend. No-op
         # (and no network) unless cfg enables it; failures never affect the
-        # local diary write above.
+        # local diary write above. On success, mark the row as backed up so the
+        # Memory Viewer can show a "Backed up" indicator.
         if cfg is not None and getattr(cfg, "supermemory_mirror_writes", True):
             from . import supermemory_backend
-            supermemory_backend.mirror_diary_summary(cfg, summary, topics, today)
+            if supermemory_backend.mirror_diary_summary(cfg, summary, topics, today):
+                db.mark_summary_synced(summary_id)
 
         return summary_id
 

@@ -339,37 +339,33 @@ screenshots), add the Scrapling MCP server instead (see
 </details>
 
 <details>
-<summary><strong>Cloud memory (Supermemory) — opt-in, off by default</strong></summary>
+<summary><strong>Cloud Memory Backup — optional, off by default</strong></summary>
 
-By default all memory is 100% local and nothing leaves your machine. This is
-the **only** optional cloud feature in Jarvis's memory layer, and it is **off
-unless you turn it on and supply a key**. When enabled, Jarvis mirrors its
-already-scrubbed diary summaries and learned facts to
-[Supermemory](https://supermemory.ai) and merges Supermemory's recall into
-replies, adding capabilities the local store doesn't have (automatic
-contradiction resolution, time-based forgetting, hybrid search across
-everything you've stored).
+By default all memory is 100% local and nothing leaves your machine. Cloud
+Memory Backup is the **only** optional cloud feature in Jarvis's memory layer,
+and it is **off unless you turn it on**. When enabled, Jarvis keeps a secure
+copy of its already-scrubbed diary summaries and learned facts so memory is
+never lost, and it can recall them in replies, adding capabilities the local
+store doesn't have (automatic contradiction resolution, time-based forgetting,
+hybrid search). Powered by [Supermemory](https://supermemory.ai).
 
-⚠️ Enabling this sends memory off your device. Only text that has already passed
-Jarvis's redaction and diary scrub is mirrored — never raw transcripts. To keep
-everything on infrastructure you control, point `supermemory_base_url` at a
-self-hosted Supermemory instance.
+**To turn it on (no file editing needed):**
 
-Install the SDK, then enable it:
+1. `pip install supermemory`
+2. Open **Settings → Cloud Memory Backup**.
+3. Switch on **Back up my memory online** and paste your **Account key** (from
+   [console.supermemory.ai](https://console.supermemory.ai)).
+4. Click **Test connection** — it shows "Connected" when your key works.
 
-```bash
-pip install supermemory
-```
+Once connected, each backed-up entry shows a **Backed up** badge in the Memory
+Viewer, and you'll get a notification at startup confirming the connection.
 
-```json
-{
-  "supermemory_enabled": true,            // off by default
-  "supermemory_api_key": "sm_...",        // or set SUPERMEMORY_API_KEY
-  "supermemory_base_url": "",             // empty = hosted API; set for self-host
-  "supermemory_container_tag": "",        // optional isolation namespace
-  "supermemory_mirror_writes": true       // false = use for recall only
-}
-```
+Enabling this sends memory off your device. Only text that has already been
+cleaned of sensitive details is backed up — never raw transcripts. To keep
+everything on infrastructure you control, set your own server under
+**Settings → Advanced → Cloud server address** (a self-hosted Supermemory
+instance). Prefer environment variables? Set `SUPERMEMORY_API_KEY` instead of
+pasting the key.
 
 When disabled (the default), the package is never imported and no network call
 is ever made — behaviour is identical to a stock local install. On any network

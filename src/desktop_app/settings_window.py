@@ -19,7 +19,7 @@ from PyQt6.QtWidgets import (
     QMessageBox, QSizePolicy, QListWidget, QListWidgetItem,
     QStackedWidget, QSplitter, QInputDialog, QFrame,
 )
-from PyQt6.QtCore import Qt, QSize
+from PyQt6.QtCore import Qt, QSize, QThread, pyqtSignal
 from PyQt6.QtGui import QFont
 
 from jarvis.config import (
@@ -28,7 +28,7 @@ from jarvis.config import (
     SUPPORTED_CHAT_MODELS,
 )
 from jarvis.debug import debug_log
-from desktop_app.themes import apply_theme
+from desktop_app.themes import apply_theme, COLORS
 from desktop_app.mcp_catalogue import CATALOGUE, CATALOGUE_BY_NAME, MCPEntry
 
 
@@ -65,11 +65,37 @@ CATEGORIES = [
     ("vad", "📊 Voice Activity Detection"),
     ("timing", "⏱️ Timing & Windows"),
     ("memory", "🧠 Memory & Dialogue"),
+    ("cloud", "Cloud Memory Backup"),
     ("location", "📍 Location"),
     ("features", "✨ Features"),
     ("mcps", "🔌 MCP Servers"),
     ("advanced", "🔧 Advanced"),
 ]
+
+
+class SupermemoryCheckWorker(QThread):
+    """Background probe for the Cloud Memory 'Test connection' button.
+
+    Runs the network check off the UI thread and reports ``(ok, message)`` so
+    the settings window never freezes while contacting the cloud service.
+    """
+    finished = pyqtSignal(bool, str)
+
+    def __init__(self, api_key: str, base_url: str, container_tag: str):
+        super().__init__()
+        self._api_key = api_key
+        self._base_url = base_url
+        self._container_tag = container_tag
+
+    def run(self):  # noqa: D102
+        try:
+            from jarvis.memory.supermemory_backend import check_connection
+            ok, message = check_connection(
+                self._api_key, self._base_url, self._container_tag
+            )
+        except Exception as e:  # never let the worker crash the UI
+            ok, message = False, f"Couldn't connect: {e}"
+        self.finished.emit(ok, message)
 
 
 def _dictation_hotkey_choices() -> list:
@@ -294,29 +320,32 @@ def _build_field_metadata() -> List[FieldMeta]:
     f("agentic_max_turns", "Agentic Max Turns",
       "Maximum turns in agentic tool-use loops",
       "memory", "int", min_val=1, max_val=30)
-    f("supermemory_enabled", "Supermemory (cloud memory)",
-      "Opt-in. Off by default and fully offline. When on (and a key is set), "
-      "Jarvis mirrors its scrubbed diary/facts to supermemory and merges its "
-      "recall into replies. Nothing leaves the device unless this is enabled.",
-      "memory", "bool")
-    f("supermemory_api_key", "Supermemory API Key",
-      "API key from console.supermemory.ai (or your self-hosted instance). "
-      "Required to enable the cloud memory backend; can also be set via the "
-      "SUPERMEMORY_API_KEY environment variable.",
-      "memory", "str", nullable=True)
-    f("supermemory_base_url", "Supermemory Base URL",
-      "Leave empty for the hosted API (https://api.supermemory.ai). Set this "
-      "to point at a self-hosted supermemory instance so no data leaves your "
-      "own infrastructure.",
-      "memory", "str", nullable=True)
-    f("supermemory_container_tag", "Supermemory Container Tag",
-      "Isolation namespace for this user's memories (leave empty for a "
-      "stable default).",
-      "memory", "str", nullable=True)
-    f("supermemory_mirror_writes", "Mirror Memory Writes",
-      "When supermemory is enabled, also push new diary summaries and facts "
-      "up to it. Turn off to use supermemory for recall only.",
-      "memory", "bool")
+    # Cloud Memory Backup (Supermemory). The two everyday controls live on the
+    # dedicated "Cloud Memory Backup" page (built by _build_cloud_page); the
+    # power-user options sit under Advanced. All are saved via the normal
+    # metadata loop because their widgets are registered in self._widgets.
+    f("supermemory_enabled", "Back up my memory online",
+      "Off by default. Your conversations stay on this computer unless you turn "
+      "this on. When on, Jarvis securely backs up its memory so it is not lost "
+      "and can be recalled later. Powered by Supermemory.",
+      "cloud", "bool")
+    f("supermemory_api_key", "Account key",
+      "Paste the key from your Supermemory account (console.supermemory.ai). "
+      "This is what lets Jarvis connect to your private cloud memory.",
+      "cloud", "secret", nullable=True)
+    f("supermemory_base_url", "Cloud server address",
+      "Advanced. Leave blank to use the standard Supermemory service. Set this "
+      "only if you run your own Supermemory server and want your data to stay "
+      "on it.",
+      "advanced", "str", nullable=True)
+    f("supermemory_container_tag", "Cloud account namespace",
+      "Advanced. Leave blank unless you have been told otherwise. Keeps this "
+      "user's memories separate inside your Supermemory account.",
+      "advanced", "str", nullable=True)
+    f("supermemory_mirror_writes", "Upload new memories",
+      "Advanced. On by default when cloud backup is enabled. Turn off to use "
+      "the cloud only for recall, without uploading new memories.",
+      "advanced", "bool")
 
     # --- Location ---
     f("location_enabled", "Enable Location",
@@ -477,6 +506,8 @@ class SettingsWindow(QDialog):
         for cat_key, cat_label in CATEGORIES:
             if cat_key == "mcps":
                 page = self._build_mcp_page()
+            elif cat_key == "cloud":
+                page = self._build_cloud_page(fields_by_cat.get("cloud", []))
             else:
                 cat_fields = fields_by_cat.get(cat_key, [])
                 if not cat_fields:
@@ -514,6 +545,109 @@ class SettingsWindow(QDialog):
         btn_layout.addWidget(save_btn)
 
         layout.addLayout(btn_layout)
+
+    def _build_cloud_page(self, fields: List[FieldMeta]) -> QWidget:
+        """Custom, jargon-free page for Cloud Memory Backup.
+
+        Shows a plain-language intro, the everyday controls (on/off + account
+        key, built from metadata so they save normally), and a Test-connection
+        button with a live status line. Power-user options live under Advanced.
+        """
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+
+        container = QWidget()
+        layout = QVBoxLayout(container)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(14)
+
+        intro = QLabel(
+            "Cloud Memory Backup keeps a secure copy of what Jarvis remembers, so "
+            "your assistant never forgets and can pick up where you left off. It "
+            "is off by default: nothing leaves this computer unless you turn it on "
+            "and add your account key below."
+        )
+        intro.setWordWrap(True)
+        intro.setStyleSheet(f"color: {COLORS['text_muted']}; font-size: 13px;")
+        layout.addWidget(intro)
+
+        # Everyday controls (toggle + key). Registered in self._widgets so the
+        # normal _on_save metadata loop persists them.
+        form_box = QWidget()
+        form = QFormLayout(form_box)
+        form.setContentsMargins(0, 0, 0, 0)
+        form.setSpacing(14)
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        for fm in fields:
+            widget = self._create_widget(fm)
+            self._widgets[fm.key] = widget
+            label = QLabel(fm.label)
+            label.setToolTip(fm.description)
+            form.addRow(label, widget)
+        layout.addWidget(form_box)
+
+        # Test connection button + live status line.
+        test_row = QHBoxLayout()
+        test_row.setContentsMargins(0, 0, 0, 0)
+        test_row.setSpacing(10)
+        self._cloud_test_btn = QPushButton("Test connection")
+        self._cloud_test_btn.clicked.connect(self._on_cloud_test)
+        test_row.addWidget(self._cloud_test_btn)
+        self._cloud_status = QLabel("")
+        self._cloud_status.setWordWrap(True)
+        self._cloud_status.setStyleSheet(f"color: {COLORS['text_muted']}; font-size: 13px;")
+        test_row.addWidget(self._cloud_status, 1)
+        layout.addLayout(test_row)
+
+        fine = QLabel(
+            "Powered by Supermemory. Only summaries already cleaned of sensitive "
+            "details are backed up. Advanced options (such as using your own "
+            "server) are under the Advanced section."
+        )
+        fine.setWordWrap(True)
+        fine.setStyleSheet(f"color: {COLORS['text_muted']}; font-size: 11px;")
+        layout.addWidget(fine)
+
+        layout.addStretch()
+        scroll.setWidget(container)
+        return scroll
+
+    def _cloud_widget_text(self, key: str) -> str:
+        """Read a possibly-not-yet-built cloud widget's text, safely."""
+        w = self._widgets.get(key)
+        return w.text().strip() if w is not None else ""
+
+    def _set_cloud_status(self, ok: Optional[bool], text: str) -> None:
+        if ok is True:
+            colour = COLORS["success"]
+        elif ok is False:
+            colour = COLORS["error"]
+        else:
+            colour = COLORS["text_muted"]
+        self._cloud_status.setText(text)
+        self._cloud_status.setStyleSheet(f"color: {colour}; font-size: 13px;")
+
+    def _on_cloud_test(self) -> None:
+        """Probe the cloud service with the values the user just entered."""
+        api_key = self._cloud_widget_text("supermemory_api_key")
+        if not api_key:
+            self._set_cloud_status(False, "Enter your account key first.")
+            return
+        base_url = self._cloud_widget_text("supermemory_base_url")
+        tag = self._cloud_widget_text("supermemory_container_tag")
+        self._cloud_test_btn.setEnabled(False)
+        self._set_cloud_status(None, "Checking...")
+        self._cloud_worker = SupermemoryCheckWorker(api_key, base_url, tag)
+        self._cloud_worker.finished.connect(self._on_cloud_test_done)
+        self._cloud_worker.start()
+
+    def _on_cloud_test_done(self, ok: bool, message: str) -> None:
+        self._cloud_test_btn.setEnabled(True)
+        if ok:
+            self._set_cloud_status(True, "Connected. Your cloud memory is ready.")
+        else:
+            self._set_cloud_status(False, message or "Couldn't connect.")
 
     def _build_category_tab(self, fields: List[FieldMeta]) -> QWidget:
         """Build a scrollable form for a category's fields."""
@@ -611,6 +745,16 @@ class SettingsWindow(QDialog):
 
         if fm.field_type == "list":
             return self._create_list_widget(fm, current)
+
+        if fm.field_type == "secret":
+            # Masked input for keys/tokens. Value extraction uses the same
+            # `.text()` path as a plain string field (see _get_value).
+            w = QLineEdit()
+            w.setEchoMode(QLineEdit.EchoMode.Password)
+            w.setText(str(current) if current not in (None, "") else "")
+            w.setPlaceholderText("Paste your key here")
+            w.setToolTip(fm.description)
+            return w
 
         # Default: string field
         w = QLineEdit()
