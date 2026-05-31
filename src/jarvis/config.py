@@ -298,6 +298,19 @@ class Settings:
     # challenges. Slower and more conspicuous, so off by default.
     scrapling_solve_cloudflare: bool
 
+    # Supermemory (opt-in cloud memory)
+    # Off by default. Local memory stays the default and works fully offline.
+    # When a key is set, Jarvis mirrors its already-scrubbed diary/graph facts
+    # to supermemory and merges supermemory recall into enrichment. Set
+    # ``supermemory_base_url`` to point at a self-hosted instance; empty uses
+    # the hosted default (https://api.supermemory.ai). Nothing leaves the
+    # device unless ``supermemory_enabled`` is True and a key is present.
+    supermemory_enabled: bool
+    supermemory_api_key: str
+    supermemory_base_url: str
+    supermemory_container_tag: str
+    supermemory_mirror_writes: bool
+
     # Dictation (hold-to-dictate)
     dictation_enabled: bool
     dictation_hotkey: str
@@ -358,6 +371,14 @@ def _migrate_config(cfg_path: Path, cfg_json: Dict[str, Any]) -> Dict[str, Any]:
             print("📢 Upgraded TTS engine: system → piper (neural voice with auto-download)", flush=True)
             print("   To revert: set \"tts_engine\": \"system\" in config.json", flush=True)
         cfg_json["_config_version"] = 1
+        modified = True
+
+    # Migration v2: introduce opt-in supermemory fields. No value rewrite is
+    # needed — the new keys default to "off"/empty and are merged in by
+    # get_default_config(). This bump only keeps the version line clean for
+    # future migrations. Silent, since the feature is off by default.
+    if migration_version < 2:
+        cfg_json["_config_version"] = 2
         modified = True
 
     # Save migrated config
@@ -607,6 +628,14 @@ def get_default_config() -> Dict[str, Any]:
         "scrapling_fetch_enabled": False,
         "scrapling_binary": "scrapling",
         "scrapling_solve_cloudflare": False,
+
+        # Supermemory (opt-in cloud memory). Off by default; local memory is
+        # the default and nothing leaves the device unless enabled with a key.
+        "supermemory_enabled": False,
+        "supermemory_api_key": "",
+        "supermemory_base_url": "",
+        "supermemory_container_tag": "",
+        "supermemory_mirror_writes": True,
 
         # Dictation (hold-to-dictate, WisprFlow-like)
         "dictation_enabled": True,
@@ -858,6 +887,13 @@ def load_settings() -> Settings:
     scrapling_fetch_enabled = bool(merged.get("scrapling_fetch_enabled", False))
     scrapling_binary = str(merged.get("scrapling_binary", "scrapling") or "scrapling").strip()
     scrapling_solve_cloudflare = bool(merged.get("scrapling_solve_cloudflare", False))
+    supermemory_enabled = bool(merged.get("supermemory_enabled", False))
+    supermemory_api_key = str(merged.get("supermemory_api_key", "") or "").strip()
+    # Env override mirrors the Whisper precedent and the SDK's own convention.
+    supermemory_api_key = os.environ.get("SUPERMEMORY_API_KEY", "") or supermemory_api_key
+    supermemory_base_url = str(merged.get("supermemory_base_url", "") or "").strip()
+    supermemory_container_tag = str(merged.get("supermemory_container_tag", "") or "").strip()
+    supermemory_mirror_writes = bool(merged.get("supermemory_mirror_writes", True))
     dictation_enabled = bool(merged.get("dictation_enabled", True))
     dictation_hotkey = str(merged.get("dictation_hotkey", _default_dictation_hotkey())).strip()
     dictation_filler_removal = bool(merged.get("dictation_filler_removal", False))
@@ -1015,6 +1051,13 @@ def load_settings() -> Settings:
         scrapling_fetch_enabled=scrapling_fetch_enabled,
         scrapling_binary=scrapling_binary,
         scrapling_solve_cloudflare=scrapling_solve_cloudflare,
+
+        # Supermemory (opt-in cloud memory)
+        supermemory_enabled=supermemory_enabled,
+        supermemory_api_key=supermemory_api_key,
+        supermemory_base_url=supermemory_base_url,
+        supermemory_container_tag=supermemory_container_tag,
+        supermemory_mirror_writes=supermemory_mirror_writes,
 
         # Dictation
         dictation_enabled=dictation_enabled,

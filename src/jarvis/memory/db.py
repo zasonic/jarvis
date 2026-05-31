@@ -38,6 +38,7 @@ CREATE TABLE IF NOT EXISTS conversation_summaries (
   summary    TEXT NOT NULL,  -- Concise summary of the day's conversations
   topics     TEXT,           -- Comma-separated list of main topics discussed
   source_app TEXT NOT NULL,  -- Source app that generated the conversation
+  synced_at  TEXT,           -- ISO-8601 UTC when last backed up to cloud memory; NULL = local only
   UNIQUE(date_utc, source_app)
 );
 
@@ -144,7 +145,17 @@ class Database:
             cur.executescript(_SCHEMA_SQL)
             if self.is_vss_enabled:
                 cur.executescript(_VSS_SCHEMA_SQL)
+            # Idempotent column migrations for databases created before a column
+            # was added (CREATE TABLE IF NOT EXISTS won't alter an existing one).
+            self._ensure_column(cur, "conversation_summaries", "synced_at", "TEXT")
             self.conn.commit()
+
+    @staticmethod
+    def _ensure_column(cur, table: str, column: str, decl: str) -> None:
+        """Add ``column`` to ``table`` if it isn't already present (SQLite)."""
+        existing = {row[1] for row in cur.execute(f"PRAGMA table_info({table})").fetchall()}
+        if column not in existing:
+            cur.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
 
     
 
@@ -474,6 +485,22 @@ class Database:
             )
             self.conn.commit()
             return int(cur.lastrowid)
+
+    def mark_summary_synced(self, summary_id: int, ts_utc: Optional[str] = None) -> None:
+        """Record that a summary was backed up to cloud memory at ``ts_utc``.
+
+        Used to show a "Backed up" indicator in the Memory Viewer. ``ts_utc``
+        defaults to now. Fails soft — a missing row is a no-op.
+        """
+        if ts_utc is None:
+            ts_utc = datetime.now(timezone.utc).isoformat()
+        with self._lock:
+            cur = self.conn.cursor()
+            cur.execute(
+                "UPDATE conversation_summaries SET synced_at = ? WHERE id = ?",
+                (ts_utc, int(summary_id)),
+            )
+            self.conn.commit()
 
     def get_conversation_summary(self, date_utc: str, source_app: str = "jarvis") -> Optional[sqlite3.Row]:
         """Get conversation summary for a specific date."""

@@ -53,7 +53,7 @@ class TestFieldMetadata:
 
     def test_field_types_are_valid(self):
         """All field_type values must be from the allowed set."""
-        valid_types = {"bool", "int", "float", "str", "choice", "device", "list"}
+        valid_types = {"bool", "int", "float", "str", "choice", "device", "list", "secret"}
         for fm in FIELD_METADATA:
             assert fm.field_type in valid_types, (
                 f"Field '{fm.key}' has invalid type '{fm.field_type}'"
@@ -66,6 +66,20 @@ class TestFieldMetadata:
                 assert fm.choices and len(fm.choices) > 0, (
                     f"Choice field '{fm.key}' has no choices defined"
                 )
+
+    def test_cloud_memory_fields_are_grandma_friendly(self):
+        """The everyday cloud controls live on the 'cloud' page with a masked key;
+        the power-user options are tucked under 'advanced'."""
+        by_key = {fm.key: fm for fm in FIELD_METADATA}
+        assert by_key["supermemory_enabled"].category == "cloud"
+        assert by_key["supermemory_api_key"].category == "cloud"
+        assert by_key["supermemory_api_key"].field_type == "secret"
+        for advanced in ("supermemory_base_url", "supermemory_container_tag",
+                         "supermemory_mirror_writes"):
+            assert by_key[advanced].category == "advanced"
+        # No developer jargon in the everyday labels.
+        assert "Supermemory" not in by_key["supermemory_enabled"].label
+        assert "API" not in by_key["supermemory_api_key"].label
 
     def test_numeric_fields_have_bounds(self):
         """Numeric fields (int/float) should have min and max defined."""

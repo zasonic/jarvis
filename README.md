@@ -338,6 +338,42 @@ screenshots), add the Scrapling MCP server instead (see
 
 </details>
 
+<details>
+<summary><strong>Cloud Memory Backup — optional, off by default</strong></summary>
+
+By default all memory is 100% local and nothing leaves your machine. Cloud
+Memory Backup is the **only** optional cloud feature in Jarvis's memory layer,
+and it is **off unless you turn it on**. When enabled, Jarvis keeps a secure
+copy of its already-scrubbed diary summaries and learned facts so memory is
+never lost, and it can recall them in replies, adding capabilities the local
+store doesn't have (automatic contradiction resolution, time-based forgetting,
+hybrid search). Powered by [Supermemory](https://supermemory.ai).
+
+**To turn it on (no file editing needed):**
+
+1. `pip install supermemory`
+2. Open **Settings → Cloud Memory Backup**.
+3. Switch on **Back up my memory online** and paste your **Account key** (from
+   [console.supermemory.ai](https://console.supermemory.ai)).
+4. Click **Test connection** — it shows "Connected" when your key works.
+
+Once connected, each backed-up entry shows a **Backed up** badge in the Memory
+Viewer, and you'll get a notification at startup confirming the connection.
+
+Enabling this sends memory off your device. Only text that has already been
+cleaned of sensitive details is backed up — never raw transcripts. To keep
+everything on infrastructure you control, set your own server under
+**Settings → Advanced → Cloud server address** (a self-hosted Supermemory
+instance). Prefer environment variables? Set `SUPERMEMORY_API_KEY` instead of
+pasting the key.
+
+When disabled (the default), the package is never imported and no network call
+is ever made — behaviour is identical to a stock local install. On any network
+error Jarvis silently falls back to local memory, so a flaky connection never
+breaks a reply.
+
+</details>
+
 ## Dictation Mode — Free WisprFlow Alternative
 
 Hold a hotkey to record speech, release to paste the transcription into any app. Works everywhere — your editor, browser, chat, terminal. Completely local, completely free.

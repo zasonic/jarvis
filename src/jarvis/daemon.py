@@ -272,6 +272,7 @@ def _check_and_update_diary(
                 on_token=on_token,
                 thinking=getattr(cfg, 'llm_thinking_enabled', False),
                 graph_picker_model=graph_picker_model,
+                cfg=cfg,
             )
 
             # Flush any remaining tokens in IPC mode
@@ -326,6 +327,15 @@ def main() -> None:
         print(f"🔌 LLM backend: {cfg.llm_backend} @ {cfg.ollama_base_url}", flush=True)
     print(f"🧠 Using chat model: {cfg.ollama_chat_model}", flush=True)
     print(f"🎤 Using whisper model: {cfg.whisper_model}", flush=True)
+
+    # Opt-in supermemory backend: probe once at startup so a misconfiguration
+    # surfaces loudly instead of silently degrading every turn to local memory.
+    # No-op (and no network) unless the user enabled it with a key.
+    try:
+        from .memory import supermemory_backend
+        supermemory_backend.startup_check(cfg)
+    except Exception as e:
+        debug_log(f"supermemory startup check failed (non-fatal): {e}", "memory")
 
     # MCP preflight: discover and cache external MCP tools
     mcps = getattr(cfg, "mcps", {}) or {}

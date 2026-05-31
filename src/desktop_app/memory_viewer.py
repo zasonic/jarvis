@@ -106,7 +106,7 @@ def get_memories() -> Response:
     where_clause = " AND ".join(conditions) if conditions else "1=1"
 
     query = f"""
-        SELECT cs.id, cs.date_utc, cs.ts_utc, cs.summary, cs.topics, cs.source_app
+        SELECT cs.id, cs.date_utc, cs.ts_utc, cs.summary, cs.topics, cs.source_app, cs.synced_at
         FROM conversation_summaries cs
         WHERE {where_clause}
         ORDER BY cs.date_utc DESC
@@ -1231,6 +1231,17 @@ def index() -> str:
             color: var(--accent-secondary);
         }
 
+        .memory-synced {
+            font-family: inherit;
+            font-size: 0.72rem;
+            font-weight: 600;
+            padding: 0.1rem 0.5rem;
+            border-radius: 999px;
+            color: #16a34a;
+            background: rgba(34, 197, 94, 0.12);
+            border: 1px solid rgba(34, 197, 94, 0.35);
+        }
+
         .memory-actions {
             display: flex;
             gap: 0.5rem;
@@ -2332,6 +2343,7 @@ def index() -> str:
                         <div class="memory-date">
                             <span>📅</span>
                             ${formatDate(memory.date_utc)}
+                            ${memory.synced_at ? `<span class="memory-synced" title="Backed up to cloud memory">Backed up</span>` : ''}
                         </div>
                         <div class="memory-actions">
                             <button class="action-btn delete" title="Delete memory">🗑️</button>
