@@ -27,6 +27,7 @@ from jarvis.reply.planner import (
     progress_nudge,
     resolve_next_tool_call,
     resolve_planner_model,
+    select_parallel_batch,
     strip_memory_directives,
     plan_has_unresolved_tool_steps,
     tool_names_in_plan,
@@ -788,3 +789,154 @@ class TestPlanHasUnresolvedToolSteps:
         assert plan_has_unresolved_tool_steps(
             plan, ["chrome-devtools__navigate_page"]
         ) is False
+
+
+def _schema(*names_and_props):
+    """Build a minimal tools JSON schema. Each arg is (name, [prop, ...])."""
+    out = []
+    for name, props in names_and_props:
+        out.append({
+            "function": {
+                "name": name,
+                "description": f"{name} tool",
+                "parameters": {
+                    "type": "object",
+                    "properties": {p: {"type": "string"} for p in props},
+                },
+            }
+        })
+    return out
+
+
+class TestSelectParallelBatch:
+    """select_parallel_batch picks a contiguous leading run of independent,
+    parallel-safe, concrete plan steps to dispatch concurrently."""
+
+    SAFE = {"webSearch", "getWeather", "fetchWebPage"}
+
+    def _steps(self):
+        return [
+            "getWeather location='London'",
+            "webSearch query='today headlines'",
+            "Reply to the user with the combined findings.",
+        ]
+
+    def test_two_independent_steps_batched(self):
+        schema = _schema(("getWeather", ["location"]), ("webSearch", ["query"]))
+        batch = select_parallel_batch(
+            self._steps(), 0, schema, self.SAFE, [], max_batch=4,
+        )
+        assert [name for name, _ in batch] == ["getWeather", "webSearch"]
+        # Args parsed concretely, in plan order.
+        assert batch[0][1] == {"location": "London"}
+        assert batch[1][1] == {"query": "today headlines"}
+
+    def test_respects_max_batch_cap(self):
+        steps = [
+            "getWeather location='London'",
+            "webSearch query='a'",
+            "fetchWebPage url='https://example.com'",
+            "Reply to the user.",
+        ]
+        schema = _schema(
+            ("getWeather", ["location"]),
+            ("webSearch", ["query"]),
+            ("fetchWebPage", ["url"]),
+        )
+        batch = select_parallel_batch(steps, 0, schema, self.SAFE, [], max_batch=2)
+        assert len(batch) == 2
+        assert [n for n, _ in batch] == ["getWeather", "webSearch"]
+
+    def test_placeholder_step_stops_the_run(self):
+        # A <placeholder> step depends on a prior result — must not batch,
+        # and stops the contiguous run so the dependent tail stays sequential.
+        steps = [
+            "webSearch query='Possessor 2020 director'",
+            "webSearch query='films by <director from step 1>'",
+            "Reply to the user.",
+        ]
+        schema = _schema(("webSearch", ["query"]))
+        batch = select_parallel_batch(steps, 0, schema, self.SAFE, [], max_batch=4)
+        # Only the first concrete step qualifies; <2 ⇒ empty (sequential path).
+        assert batch == []
+
+    def test_prose_step_stops_the_run(self):
+        steps = [
+            "getWeather location='London'",
+            "search the web for the latest news",  # no key=value ⇒ not concrete
+            "Reply to the user.",
+        ]
+        schema = _schema(("getWeather", ["location"]), ("webSearch", ["query"]))
+        batch = select_parallel_batch(steps, 0, schema, self.SAFE, [], max_batch=4)
+        assert batch == []  # only one concrete leading step
+
+    def test_non_parallel_safe_tool_excluded(self):
+        # logMeal writes to the DB ⇒ not parallel-safe ⇒ stops the run.
+        steps = [
+            "getWeather location='London'",
+            "logMeal meal='a sandwich'",
+            "Reply to the user.",
+        ]
+        schema = _schema(("getWeather", ["location"]), ("logMeal", ["meal"]))
+        batch = select_parallel_batch(steps, 0, schema, self.SAFE, [], max_batch=4)
+        assert batch == []  # getWeather alone, logMeal stops the run
+
+    def test_duplicate_of_existing_sig_stops_the_run(self):
+        steps = [
+            "getWeather location='London'",
+            "webSearch query='today headlines'",
+            "Reply to the user.",
+        ]
+        schema = _schema(("getWeather", ["location"]), ("webSearch", ["query"]))
+        existing = [("getWeather", '{"location": "London"}')]
+        batch = select_parallel_batch(
+            steps, 0, schema, self.SAFE, existing, max_batch=4,
+        )
+        # First step already executed ⇒ run stops immediately ⇒ empty.
+        assert batch == []
+
+    def test_duplicate_within_batch_stops_the_run(self):
+        steps = [
+            "webSearch query='foo'",
+            "webSearch query='foo'",  # identical ⇒ stops at the dup
+            "webSearch query='bar'",
+            "Reply to the user.",
+        ]
+        schema = _schema(("webSearch", ["query"]))
+        batch = select_parallel_batch(steps, 0, schema, self.SAFE, [], max_batch=4)
+        # Only the first qualifies before the duplicate halts the scan.
+        assert batch == []
+
+    def test_control_tools_break(self):
+        steps = [
+            "getWeather location='London'",
+            "stop",
+            "webSearch query='x'",
+        ]
+        schema = _schema(
+            ("getWeather", ["location"]), ("stop", []), ("webSearch", ["query"]),
+        )
+        safe = self.SAFE | {"stop"}  # even if mislabelled safe, control tools break
+        batch = select_parallel_batch(steps, 0, schema, safe, [], max_batch=4)
+        assert batch == []
+
+    def test_start_index_offset(self):
+        steps = [
+            "searchMemory topic='x'",  # already stripped in real flow, but guard anyway
+            "getWeather location='London'",
+            "webSearch query='news'",
+            "Reply to the user.",
+        ]
+        schema = _schema(("getWeather", ["location"]), ("webSearch", ["query"]))
+        batch = select_parallel_batch(steps, 1, schema, self.SAFE, [], max_batch=4)
+        assert [n for n, _ in batch] == ["getWeather", "webSearch"]
+
+    def test_max_batch_below_two_disables(self):
+        steps = self._steps()
+        schema = _schema(("getWeather", ["location"]), ("webSearch", ["query"]))
+        assert select_parallel_batch(steps, 0, schema, self.SAFE, [], max_batch=1) == []
+
+    def test_single_eligible_step_returns_empty(self):
+        steps = ["getWeather location='London'", "Reply to the user."]
+        schema = _schema(("getWeather", ["location"]))
+        assert select_parallel_batch(steps, 0, schema, self.SAFE, [], max_batch=4) == []

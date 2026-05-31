@@ -12,6 +12,12 @@ from ..types import ToolExecutionResult
 class ScreenshotTool(Tool):
     """Tool for capturing screenshots and performing OCR."""
 
+    # Read-only screen capture + local OCR with no shared-DB writes — safe
+    # to run in a concurrent planner batch alongside other parallel-safe tools.
+    @property
+    def parallel_safe(self) -> bool:
+        return True
+
     @property
     def name(self) -> str:
         return "screenshot"

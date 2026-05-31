@@ -18,6 +18,12 @@ _THIN_CONTENT_CHARS = 200
 class FetchWebPageTool(Tool):
     """Tool for fetching and extracting content from web pages."""
 
+    # Read-only network fetch with no shared-DB writes — safe to run in a
+    # concurrent planner batch alongside other parallel-safe tools.
+    @property
+    def parallel_safe(self) -> bool:
+        return True
+
     @property
     def name(self) -> str:
         return "fetchWebPage"

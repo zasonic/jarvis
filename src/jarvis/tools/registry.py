@@ -20,6 +20,9 @@ from .builtin.refresh_mcp_tools import RefreshMCPToolsTool
 from .builtin.weather import WeatherTool
 from .builtin.stop import StopTool
 from .builtin.tool_search import ToolSearchTool
+from .builtin.scheduling.schedule_task import ScheduleTaskTool
+from .builtin.scheduling.list_tasks import ListScheduledTasksTool
+from .builtin.scheduling.cancel_task import CancelScheduledTaskTool
 from .types import ToolExecutionResult
 from ..config import Settings
 from .external.mcp_client import MCPClient
@@ -37,6 +40,9 @@ BUILTIN_TOOLS = {
     "deleteMeal": DeleteMealTool(),
     "refreshMCPTools": RefreshMCPToolsTool(),
     "getWeather": WeatherTool(),
+    "scheduleTask": ScheduleTaskTool(),
+    "listScheduledTasks": ListScheduledTasksTool(),
+    "cancelScheduledTask": CancelScheduledTaskTool(),
     "stop": StopTool(),
     "toolSearchTool": ToolSearchTool(),
 }

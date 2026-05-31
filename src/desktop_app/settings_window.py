@@ -103,7 +103,11 @@ def _build_field_metadata() -> List[FieldMeta]:
       "llm", "choice", choices=model_choices)
     f("ollama_embed_model", "Embedding Model", "Model for text embeddings",
       "llm", "str")
-    f("ollama_base_url", "Ollama URL", "Ollama server base URL",
+    f("ollama_base_url", "Server URL", "Inference server base URL (Ollama or an OpenAI-compatible local server)",
+      "llm", "str")
+    f("llm_backend", "Backend", "Local inference API: Ollama native, or OpenAI-compatible (vLLM, llama.cpp, LM Studio, Jan)",
+      "llm", "choice", choices=[("ollama", "Ollama"), ("openai", "OpenAI-compatible")])
+    f("llm_api_key", "API Key (optional)", "Bearer token for servers that require one; most local servers ignore it",
       "llm", "str")
     f("llm_chat_timeout_sec", "Chat Timeout", "Max seconds for chat responses",
       "llm", "float", min_val=10, max_val=600, step=10, suffix="s")

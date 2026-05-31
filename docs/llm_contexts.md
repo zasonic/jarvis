@@ -165,11 +165,28 @@ Every distinct LLM call in Jarvis, what feeds it, what consumes it, and how it i
 - **System prompt**: `_STEP_RESOLVER_SYSTEM` at [planner.py:300](src/jarvis/reply/planner.py:300). Teaches one-JSON-object output, placeholder substitution from prior results, `null` for synthesis steps.
 - **Output**: `(tool_name, arguments)` tuple or `None`. Unknown tool names are rejected via the allow-list guard.
 - **Limits**: `planner_timeout_sec`. Fail-open → `None` (engine falls back to the chat-model turn).
+- **Parallel batch (no new LLM context)**: before this per-step resolve, the engine may select a contiguous leading run of independent, `parallel_safe` steps via `select_parallel_batch()` and dispatch them **concurrently** in one turn (`_execute_parallel_plan_batch`). Those steps go through the concrete fast-path, so the batch adds **zero LLM calls** — only the IO-bound tool round-trips overlap. Gated by `planner_parallel_enabled` / `planner_parallel_max`; fails open to this sequential resolver. See `planner.spec.md` → "Parallel batch execution".
 
 ## 14. Tool-specific LLM calls
 
 - **Weather** ([src/jarvis/tools/builtin/weather.py](src/jarvis/tools/builtin/weather.py), ~line 60) — `ollama_chat_model`, parses location/time/unit from the query.
 - **Nutrition log_meal** ([src/jarvis/tools/builtin/nutrition/log_meal.py](src/jarvis/tools/builtin/nutrition/log_meal.py), lines 48 & 136) — `ollama_chat_model`, extracts nutrients, confirms logging.
+
+## Backend transport (applies to every context above)
+
+Every LLM call in this document goes through `src/jarvis/llm.py`, which speaks
+either Ollama's native API (default) or any local OpenAI-compatible server
+(`llm_backend` config). This is a **transport/shape** concern only — it adds
+no new context and changes no gating: requests are shaped per backend and
+responses are normalised back to Ollama's shape, so each context's model,
+limits and data flow are identical regardless of backend. See
+`src/jarvis/llm.spec.md`. Embeddings (used by tool selection and memory
+search) follow the same backend split (`/api/embeddings` vs `/v1/embeddings`).
+
+## 15. Scheduler-triggered reply (no new LLM context)
+
+- **Trigger**: the background `TaskScheduler` ([src/jarvis/scheduling/scheduler.py](src/jarvis/scheduling/scheduler.py)) fires a stored task prompt at its scheduled time. It is an additional **entry point** into the existing reply flow (#1 and its dependents), not a new LLM call type. The scheduling tools (`scheduleTask` etc.) make **no LLM call** — the model resolves the schedule into structured numeric fields and the tool only does arithmetic.
+- **Isolation**: scheduled runs use a dedicated `DialogueMemory` so they never contaminate the live conversation's hot window. See `src/jarvis/scheduling/scheduling.spec.md`.
 
 ---
 

@@ -74,6 +74,15 @@ class Settings:
 
     # LLM & AI Models
     ollama_base_url: str
+    # Which local inference backend speaks at ollama_base_url. "ollama" uses
+    # Ollama's native API (/api/chat, /api/embeddings); "openai" uses the
+    # OpenAI-compatible API (/v1/chat/completions, /v1/embeddings) exposed by
+    # vLLM, llama.cpp server, LM Studio, Jan, LocalAI — and by Ollama itself.
+    # Stays 100% local; no cloud providers.
+    llm_backend: str
+    # Optional bearer token for backends that require one. Most local servers
+    # ignore it; left empty by default.
+    llm_api_key: str
     ollama_embed_model: str
     ollama_chat_model: str
     llm_chat_timeout_sec: float
@@ -237,6 +246,25 @@ class Settings:
     # the critical path — a long timeout would dominate first-token
     # latency for every query. Planner fails open on timeout.
     planner_timeout_sec: float
+    # Whether the planner's direct-exec path may run a leading run of
+    # independent, side-effect-free tool steps concurrently instead of
+    # one-per-turn. True = parallelise eligible steps; False = legacy
+    # strictly-sequential dispatch. Fails open to sequential on any error.
+    planner_parallel_enabled: bool
+    # Upper bound on how many tool steps run concurrently in a single
+    # parallel batch. Caps fan-out so a long plan can't open an unbounded
+    # number of network connections at once.
+    planner_parallel_max: int
+
+    # Background scheduler for reminders / recurring updates / background
+    # jobs. When enabled, the daemon runs a thread that fires stored task
+    # prompts through the reply engine and speaks the result. Fully local;
+    # tasks live in the local SQLite DB. Disable to turn the feature off
+    # entirely (the scheduleTask tool still records, but nothing fires).
+    scheduler_enabled: bool
+    # How often (seconds) the scheduler wakes to check for due tasks. Also
+    # the worst-case lateness of a "fire in N minutes" task.
+    scheduler_tick_seconds: float
 
     # Location Services
     location_enabled: bool
@@ -399,6 +427,8 @@ def get_default_config() -> Dict[str, Any]:
 
         # LLM & AI Models
         "ollama_base_url": "http://127.0.0.1:11434",
+        "llm_backend": "ollama",
+        "llm_api_key": "",
         "ollama_embed_model": "nomic-embed-text",
         "ollama_chat_model": DEFAULT_CHAT_MODEL,
         "llm_chat_timeout_sec": 180.0,
@@ -550,6 +580,10 @@ def get_default_config() -> Dict[str, Any]:
         "planner_model": "",
         "planner_enabled": True,
         "planner_timeout_sec": 6.0,
+        "planner_parallel_enabled": True,
+        "planner_parallel_max": 4,
+        "scheduler_enabled": True,
+        "scheduler_tick_seconds": 30.0,
 
         # Stop Commands
         "stop_commands": ["stop", "quiet", "shush", "silence", "enough", "shut up"],
@@ -629,6 +663,12 @@ def load_settings() -> Settings:
     allowlist_bundles = _ensure_list(merged.get("allowlist_bundles"))
 
     ollama_base_url = str(merged.get("ollama_base_url"))
+    # Backend selector; unknown values fall back to "ollama" so a typo can't
+    # silently break inference.
+    llm_backend = str(merged.get("llm_backend", "ollama") or "ollama").strip().lower()
+    if llm_backend not in ("ollama", "openai"):
+        llm_backend = "ollama"
+    llm_api_key = str(merged.get("llm_api_key", "") or "")
     ollama_embed_model = str(merged.get("ollama_embed_model"))
     ollama_chat_model = str(merged.get("ollama_chat_model"))
     use_stdin = bool(merged.get("use_stdin", False))
@@ -776,6 +816,24 @@ def load_settings() -> Settings:
         planner_timeout_sec = float(merged.get("planner_timeout_sec", 6.0))
     except (TypeError, ValueError):
         planner_timeout_sec = 6.0
+    planner_parallel_enabled = bool(merged.get("planner_parallel_enabled", True))
+    try:
+        planner_parallel_max = int(merged.get("planner_parallel_max", 4))
+    except (TypeError, ValueError):
+        planner_parallel_max = 4
+    # A batch needs at least two steps to be worth parallelising; clamp
+    # to a sane floor so a misconfigured 0/1 disables fan-out cleanly
+    # rather than erroring.
+    if planner_parallel_max < 1:
+        planner_parallel_max = 1
+    scheduler_enabled = bool(merged.get("scheduler_enabled", True))
+    try:
+        scheduler_tick_seconds = float(merged.get("scheduler_tick_seconds", 30.0))
+    except (TypeError, ValueError):
+        scheduler_tick_seconds = 30.0
+    # Floor the tick so a misconfigured tiny value can't busy-spin the thread.
+    if scheduler_tick_seconds < 1.0:
+        scheduler_tick_seconds = 1.0
     try:
         tool_search_max_calls = int(merged.get("tool_search_max_calls", 3))
     except (TypeError, ValueError):
@@ -823,6 +881,8 @@ def load_settings() -> Settings:
 
         # LLM & AI Models
         ollama_base_url=ollama_base_url,
+        llm_backend=llm_backend,
+        llm_api_key=llm_api_key,
         ollama_embed_model=ollama_embed_model,
         ollama_chat_model=ollama_chat_model,
         llm_chat_timeout_sec=llm_chat_timeout_sec,
@@ -936,6 +996,10 @@ def load_settings() -> Settings:
         planner_model=planner_model,
         planner_enabled=planner_enabled,
         planner_timeout_sec=planner_timeout_sec,
+        planner_parallel_enabled=planner_parallel_enabled,
+        planner_parallel_max=planner_parallel_max,
+        scheduler_enabled=scheduler_enabled,
+        scheduler_tick_seconds=scheduler_tick_seconds,
 
         # Location Services
         location_enabled=location_enabled,

@@ -165,7 +165,8 @@ Jarvis starts listening automatically — just say "Jarvis" and talk!
 - **Unlimited Memory** - Never forgets. Searches across all your conversation history. Memory Viewer GUI included.
 - **Adaptive Tone** - Automatically surgical for code, pragmatic for business, encouraging for wellbeing — no manual mode switching
 - **Smart Tool Selection** - Embedding-based relevance filtering picks only the tools needed per query — add unlimited MCP tools without performance degradation
-- **Built-in Tools** - Screenshot OCR, web search (DuckDuckGo → Brave → Wikipedia fallback chain with auto-fetch), weather, file access, nutrition tracking, location awareness, plus a tool-discovery escape hatch the agent uses to widen its own toolset mid-reply
+- **Built-in Tools** - Screenshot OCR, web search (DuckDuckGo → Brave → Wikipedia fallback chain with auto-fetch), weather, file access, nutrition tracking, scheduled tasks and reminders, location awareness, plus a tool-discovery escape hatch the agent uses to widen its own toolset mid-reply
+- **Scheduled & Background Tasks** - Ask Jarvis to do things later or on a schedule: "remind me to stretch in 20 minutes", "every morning at 8 tell me the weather", or "research the best laptops and tell me when you're done". Tasks are stored locally and spoken back when they fire. Fully offline.
 - **JavaScript & Anti-Bot Pages (optional)** - When a normal fetch comes back empty (single-page apps, Cloudflare-protected sites), Jarvis can escalate to a locally-installed [Scrapling](https://github.com/D4Vinci/Scrapling) browser. Runs on your machine, off by default; see [Configuration](#configuration)
 - **Knowledge Graph Memory** - Self-organising memory that learns from conversations, auto-splits by topic, and surfaces relevant knowledge automatically
 - **Natural Voice** - Say "Jarvis" anywhere in your sentence, interrupt with "stop", follow up without repeating the wake word
@@ -192,6 +193,25 @@ Most users won't need to change anything. Open **⚙️ Settings** from the tray
   <img src="docs/img/settings-window.png" alt="Settings Window" width="500">
   <img src="docs/img/settings-mcp.png" alt="Settings - MCP Servers" width="500">
 </p>
+
+<details>
+<summary><strong>Local Model Server (Ollama or OpenAI-compatible)</strong></summary>
+
+By default Jarvis uses [Ollama](https://ollama.com). You can point it at any other **local** OpenAI-compatible inference server instead — [vLLM](https://github.com/vllm-project/vllm), [llama.cpp](https://github.com/ggml-org/llama.cpp) `server`, [LM Studio](https://lmstudio.ai), [Jan](https://jan.ai), or LocalAI. It stays 100% local: no cloud providers.
+
+```json
+{
+  "llm_backend": "openai",                 // "ollama" (default) or "openai" for OpenAI-compatible servers
+  "ollama_base_url": "http://127.0.0.1:8000", // your local server's base URL (any backend)
+  "llm_api_key": "",                       // optional bearer token; most local servers ignore it
+  "ollama_chat_model": "your-model-name",
+  "ollama_embed_model": "your-embedding-model"
+}
+```
+
+With `"openai"`, Jarvis calls `/v1/chat/completions` and `/v1/embeddings`; with `"ollama"` it uses Ollama's native API. Everything else (tools, planner, memory) works identically.
+
+</details>
 
 <details>
 <summary><strong>Speech Recognition (Whisper)</strong></summary>
@@ -235,13 +255,29 @@ Both thresholds are exposed in the Settings window under *Whisper*.
 
 **Tool Router** - When `"tool_selection_strategy": "llm"` (the default), Jarvis asks a small LLM to pick which tools are relevant for each query, shrinking the tool catalogue the chat model sees. By default this routing call reuses the intent-judge model — it's already warm and small enough not to stall the turn. Override with `"tool_router_model": "<name>"` to dedicate a different model to routing. Other strategies: `"keyword"` (fast, no LLM), `"embedding"` (nomic-embed-text), `"all"` (no filtering).
 
-**Task-list Planner** - Before the agentic loop, Jarvis runs a short planning pass that decomposes multi-step queries into an ordered list of sub-tasks. For small models (`gemma4:e2b` class), each planned step is directly resolved to a concrete tool call without relying on the chat model to re-plan turn-by-turn. This significantly improves multi-step reliability. Config options:
+**Task-list Planner** - Before the agentic loop, Jarvis runs a short planning pass that decomposes multi-step queries into an ordered list of sub-tasks. For small models (`gemma4:e2b` class), each planned step is directly resolved to a concrete tool call without relying on the chat model to re-plan turn-by-turn. This significantly improves multi-step reliability. Independent lookups (for example, "what's the weather and what's the news?") are dispatched concurrently, so a combined question is answered about as fast as a single one. Config options:
 
 ```json
 {
   "planner_enabled": true,          // set to false to disable the planner entirely
   "planner_model": "",              // override which model plans (default: reuses tool_router_model chain)
-  "planner_timeout_sec": 6.0        // per-call timeout for plan and step-resolver LLM calls
+  "planner_timeout_sec": 6.0,       // per-call timeout for plan and step-resolver LLM calls
+  "planner_parallel_enabled": true, // run independent lookups (e.g. weather + web search) concurrently
+  "planner_parallel_max": 4         // max tool steps dispatched at once (set 1 to disable batching)
+}
+```
+
+</details>
+
+<details>
+<summary><strong>Scheduled & Background Tasks (Advanced)</strong></summary>
+
+Jarvis can run tasks later or on a daily schedule and speak the result when they fire. Create them by voice ("remind me in 20 minutes...", "every morning at 8...", or "...and tell me when you're done"). Tasks are stored in your local database.
+
+```json
+{
+  "scheduler_enabled": true,      // run the background scheduler (when off, tasks are recorded but never fire)
+  "scheduler_tick_seconds": 30.0  // how often Jarvis checks for due tasks (also the worst-case lateness of a timed task)
 }
 ```
 
