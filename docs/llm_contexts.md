@@ -172,6 +172,17 @@ Every distinct LLM call in Jarvis, what feeds it, what consumes it, and how it i
 - **Weather** ([src/jarvis/tools/builtin/weather.py](src/jarvis/tools/builtin/weather.py), ~line 60) — `ollama_chat_model`, parses location/time/unit from the query.
 - **Nutrition log_meal** ([src/jarvis/tools/builtin/nutrition/log_meal.py](src/jarvis/tools/builtin/nutrition/log_meal.py), lines 48 & 136) — `ollama_chat_model`, extracts nutrients, confirms logging.
 
+## Backend transport (applies to every context above)
+
+Every LLM call in this document goes through `src/jarvis/llm.py`, which speaks
+either Ollama's native API (default) or any local OpenAI-compatible server
+(`llm_backend` config). This is a **transport/shape** concern only — it adds
+no new context and changes no gating: requests are shaped per backend and
+responses are normalised back to Ollama's shape, so each context's model,
+limits and data flow are identical regardless of backend. See
+`src/jarvis/llm.spec.md`. Embeddings (used by tool selection and memory
+search) follow the same backend split (`/api/embeddings` vs `/v1/embeddings`).
+
 ## 15. Scheduler-triggered reply (no new LLM context)
 
 - **Trigger**: the background `TaskScheduler` ([src/jarvis/scheduling/scheduler.py](src/jarvis/scheduling/scheduler.py)) fires a stored task prompt at its scheduled time. It is an additional **entry point** into the existing reply flow (#1 and its dependents), not a new LLM call type. The scheduling tools (`scheduleTask` etc.) make **no LLM call** — the model resolves the schedule into structured numeric fields and the tool only does arithmetic.

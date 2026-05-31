@@ -195,6 +195,25 @@ Most users won't need to change anything. Open **⚙️ Settings** from the tray
 </p>
 
 <details>
+<summary><strong>Local Model Server (Ollama or OpenAI-compatible)</strong></summary>
+
+By default Jarvis uses [Ollama](https://ollama.com). You can point it at any other **local** OpenAI-compatible inference server instead — [vLLM](https://github.com/vllm-project/vllm), [llama.cpp](https://github.com/ggml-org/llama.cpp) `server`, [LM Studio](https://lmstudio.ai), [Jan](https://jan.ai), or LocalAI. It stays 100% local: no cloud providers.
+
+```json
+{
+  "llm_backend": "openai",                 // "ollama" (default) or "openai" for OpenAI-compatible servers
+  "ollama_base_url": "http://127.0.0.1:8000", // your local server's base URL (any backend)
+  "llm_api_key": "",                       // optional bearer token; most local servers ignore it
+  "ollama_chat_model": "your-model-name",
+  "ollama_embed_model": "your-embedding-model"
+}
+```
+
+With `"openai"`, Jarvis calls `/v1/chat/completions` and `/v1/embeddings`; with `"ollama"` it uses Ollama's native API. Everything else (tools, planner, memory) works identically.
+
+</details>
+
+<details>
 <summary><strong>Speech Recognition (Whisper)</strong></summary>
 
 #### Language Modes

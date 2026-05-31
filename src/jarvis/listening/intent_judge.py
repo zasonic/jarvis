@@ -29,9 +29,19 @@ def warm_up_ollama_model(base_url: str, model: str, timeout: float) -> bool:
     Issues a minimal ``/api/generate`` request so the weights are resident
     before the first real request. Best-effort — errors are logged and
     swallowed so callers never crash on warmup failure.
+
+    No-op for non-Ollama backends: OpenAI-compatible servers (vLLM, llama.cpp,
+    LM Studio, Jan) keep models resident and expose no equivalent keep-alive
+    warmup endpoint, so there is nothing to pre-load.
     """
     if not REQUESTS_AVAILABLE or not base_url or not model:
         return False
+    try:
+        from ..llm import active_backend, BACKEND_OLLAMA
+        if active_backend() != BACKEND_OLLAMA:
+            return True
+    except Exception:
+        pass
     try:
         response = requests.post(
             f"{base_url}/api/generate",

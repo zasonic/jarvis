@@ -74,6 +74,15 @@ class Settings:
 
     # LLM & AI Models
     ollama_base_url: str
+    # Which local inference backend speaks at ollama_base_url. "ollama" uses
+    # Ollama's native API (/api/chat, /api/embeddings); "openai" uses the
+    # OpenAI-compatible API (/v1/chat/completions, /v1/embeddings) exposed by
+    # vLLM, llama.cpp server, LM Studio, Jan, LocalAI — and by Ollama itself.
+    # Stays 100% local; no cloud providers.
+    llm_backend: str
+    # Optional bearer token for backends that require one. Most local servers
+    # ignore it; left empty by default.
+    llm_api_key: str
     ollama_embed_model: str
     ollama_chat_model: str
     llm_chat_timeout_sec: float
@@ -418,6 +427,8 @@ def get_default_config() -> Dict[str, Any]:
 
         # LLM & AI Models
         "ollama_base_url": "http://127.0.0.1:11434",
+        "llm_backend": "ollama",
+        "llm_api_key": "",
         "ollama_embed_model": "nomic-embed-text",
         "ollama_chat_model": DEFAULT_CHAT_MODEL,
         "llm_chat_timeout_sec": 180.0,
@@ -652,6 +663,12 @@ def load_settings() -> Settings:
     allowlist_bundles = _ensure_list(merged.get("allowlist_bundles"))
 
     ollama_base_url = str(merged.get("ollama_base_url"))
+    # Backend selector; unknown values fall back to "ollama" so a typo can't
+    # silently break inference.
+    llm_backend = str(merged.get("llm_backend", "ollama") or "ollama").strip().lower()
+    if llm_backend not in ("ollama", "openai"):
+        llm_backend = "ollama"
+    llm_api_key = str(merged.get("llm_api_key", "") or "")
     ollama_embed_model = str(merged.get("ollama_embed_model"))
     ollama_chat_model = str(merged.get("ollama_chat_model"))
     use_stdin = bool(merged.get("use_stdin", False))
@@ -864,6 +881,8 @@ def load_settings() -> Settings:
 
         # LLM & AI Models
         ollama_base_url=ollama_base_url,
+        llm_backend=llm_backend,
+        llm_api_key=llm_api_key,
         ollama_embed_model=ollama_embed_model,
         ollama_chat_model=ollama_chat_model,
         llm_chat_timeout_sec=llm_chat_timeout_sec,

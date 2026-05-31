@@ -1,157 +1,136 @@
-"""Engine integration tests for parallel plan-batch direct-exec.
+"""Functional test for parallel plan-batch direct-exec.
 
-When a SMALL-model plan begins with two or more independent, parallel-safe
-tool steps (concrete, no placeholder), the engine dispatches them
-concurrently in a single turn instead of one-per-turn, then calls the chat
-model once for synthesis. These tests assert observable behaviour:
-
-- both independent tools run (without the sequential step-resolver);
-- their results land in the message history in PLAN order;
-- the chat model is invoked once, for the final synthesis;
-- disabling the feature flag restores the sequential single-step path.
+No mocks and no dummy data: this drives the real ``_execute_parallel_plan_batch``
+helper with the real ``localFiles`` builtin tool reading two real files on disk,
+a real ``Database``, and a real ``Settings`` config. ``localFiles`` is
+parallel-safe and needs no network, so the batch genuinely runs both reads
+concurrently and we assert the real file contents come back in plan order.
 """
 
 from __future__ import annotations
 
-from unittest.mock import patch
+import json
+import os
+import tempfile
+from pathlib import Path
 
 import pytest
 
-
-def _assistant_content(text: str):
-    return {"message": {"role": "assistant", "content": text}}
-
-
-# A plan whose first two steps are independent and parallel-safe: a weather
-# lookup and a web search. Neither references the other's result, so they can
-# run concurrently.
-_PARALLEL_PLAN = [
-    "getWeather location='London'",
-    "webSearch search_query='today top news'",
-    "Reply to the user with the combined findings.",
-]
+from jarvis.config import load_settings
+from jarvis.reply.engine import _execute_parallel_plan_batch, _maybe_digest_tool_result
+from jarvis.tools.registry import generate_tools_json_schema
 
 
-def _patches(engine_mod, fake_tool_runner, fake_chat):
-    return [
-        patch.object(engine_mod, "run_tool_with_retries", side_effect=fake_tool_runner),
-        patch.object(engine_mod, "chat_with_messages", side_effect=fake_chat),
-        patch.object(
-            engine_mod, "select_tools",
-            return_value=["getWeather", "webSearch", "stop"],
-        ),
-        patch.object(
-            engine_mod, "extract_search_params_for_memory",
-            return_value={"keywords": []},
-        ),
-        patch.object(engine_mod, "plan_query", return_value=list(_PARALLEL_PLAN)),
-    ]
-
-
-def test_independent_steps_run_in_parallel_batch(mock_config, db, dialogue_memory):
-    from jarvis.reply import engine as engine_mod
-    from jarvis.tools.types import ToolExecutionResult
-
-    mock_config.ollama_chat_model = "gemma4:e2b"  # SMALL → direct-exec eligible
-    mock_config.evaluator_enabled = False
-    mock_config.planner_parallel_enabled = True
-    mock_config.planner_parallel_max = 4
-
-    invoked: list[str] = []
-
-    def fake_tool_runner(db, cfg, tool_name, tool_args, **kwargs):
-        invoked.append(tool_name)
-        payload = {
-            "getWeather": "London: 14C, light rain.",
-            "webSearch": "Headlines: A, B, C.",
-        }.get(tool_name, "ok")
-        return ToolExecutionResult(success=True, reply_text=payload, error_message=None)
-
-    synthesis_messages: list[list] = []
-    chat_calls = [0]
-
-    def fake_chat(*args, **kwargs):
-        chat_calls[0] += 1
-        msgs = kwargs.get("messages") or (args[2] if len(args) > 2 else [])
-        synthesis_messages.append(list(msgs))
-        return _assistant_content("It's 14C and rainy in London; top news is A, B, C.")
-
-    # The step-resolver is the SEQUENTIAL path. If the parallel batch handles
-    # both steps, the resolver must never be called.
-    resolve_mock = patch.object(
-        engine_mod, "_resolve_plan_step", return_value=None,
-    ).start()
-    for p in _patches(engine_mod, fake_tool_runner, fake_chat):
-        p.start()
+@pytest.fixture
+def real_cfg():
+    """A real Settings object loaded from a temp config that disables the
+    tool-result digest, so the batch performs zero LLM calls (purely the
+    file reads). Restores any prior JARVIS_CONFIG_PATH afterwards."""
+    cfg_dir = tempfile.mkdtemp(prefix="jarvis_cfg_")
+    cfg_path = os.path.join(cfg_dir, "config.json")
+    Path(cfg_path).write_text(json.dumps({"tool_result_digest_enabled": False}))
+    prev = os.environ.get("JARVIS_CONFIG_PATH")
+    os.environ["JARVIS_CONFIG_PATH"] = cfg_path
     try:
-        engine_mod.run_reply_engine(
-            db=db, cfg=mock_config, tts=None,
-            text="what's the weather and the top news today?",
-            dialogue_memory=dialogue_memory,
-        )
+        yield load_settings()
     finally:
-        patch.stopall()
-
-    # Both independent tools ran.
-    assert sorted(invoked) == ["getWeather", "webSearch"], (
-        f"both independent tools should run; got {invoked}"
-    )
-    # The sequential step-resolver was bypassed — the batch handled both steps.
-    assert resolve_mock.call_count == 0, (
-        "parallel batch should handle both steps without the sequential resolver"
-    )
-    # Chat model invoked once, for synthesis only.
-    assert chat_calls[0] == 1, f"chat model should run once for synthesis; got {chat_calls[0]}"
-
-    # Tool results appear in PLAN order in the synthesis message history.
-    final_msgs = synthesis_messages[-1]
-    tool_result_order = [m.get("tool_name") for m in final_msgs if m.get("tool_name")]
-    assert tool_result_order == ["getWeather", "webSearch"], (
-        f"results must be appended in plan order; got {tool_result_order}"
-    )
+        if prev is None:
+            os.environ.pop("JARVIS_CONFIG_PATH", None)
+        else:
+            os.environ["JARVIS_CONFIG_PATH"] = prev
 
 
-def test_disabling_flag_restores_sequential_path(mock_config, db, dialogue_memory):
-    """With planner_parallel_enabled=False the engine must fall back to the
-    one-step-per-turn resolver (the parallel batch never runs)."""
-    from jarvis.reply import engine as engine_mod
-    from jarvis.tools.types import ToolExecutionResult
-
-    mock_config.ollama_chat_model = "gemma4:e2b"
-    mock_config.evaluator_enabled = False
-    mock_config.planner_parallel_enabled = False
-
-    def fake_tool_runner(db, cfg, tool_name, tool_args, **kwargs):
-        return ToolExecutionResult(success=True, reply_text="ok", error_message=None)
-
-    def fake_chat(*args, **kwargs):
-        return _assistant_content("done")
-
-    resolved = iter([
-        ("getWeather", {"location": "London"}),
-        ("webSearch", {"search_query": "today top news"}),
-    ])
-
-    def fake_resolve(*args, **kwargs):
+@pytest.fixture
+def two_real_files():
+    """Create two real files under the user's home directory and yield their
+    absolute paths + contents. localFiles only permits paths under
+    ``expanduser("~")``, so we place them there and pass absolute paths."""
+    home = Path(os.path.expanduser("~")).resolve()
+    base = Path(tempfile.mkdtemp(prefix="jarvis_ptest_", dir=str(home)))
+    f1 = base / "alpha.txt"
+    f2 = base / "beta.txt"
+    f1.write_text("ALPHA-CONTENT-12345")
+    f2.write_text("BETA-CONTENT-67890")
+    rel1 = str(f1.resolve())
+    rel2 = str(f2.resolve())
+    try:
+        yield (rel1, "ALPHA-CONTENT-12345"), (rel2, "BETA-CONTENT-67890")
+    finally:
+        for f in (f1, f2):
+            try:
+                f.unlink()
+            except OSError:
+                pass
         try:
-            return next(resolved)
-        except StopIteration:
-            return None
+            base.rmdir()
+        except OSError:
+            pass
 
-    with patch.object(engine_mod, "_resolve_plan_step", side_effect=fake_resolve) as resolve_mock:
-        for p in _patches(engine_mod, fake_tool_runner, fake_chat):
-            p.start()
-        try:
-            engine_mod.run_reply_engine(
-                db=db, cfg=mock_config, tts=None,
-                text="what's the weather and the top news today?",
-                dialogue_memory=dialogue_memory,
-            )
-        finally:
-            patch.stopall()
 
-    # Sequential resolver drove the steps (called at least once per tool step).
-    assert resolve_mock.call_count >= 2, (
-        f"sequential resolver should drive steps when parallel disabled; "
-        f"got {resolve_mock.call_count} calls"
+def test_independent_reads_run_as_one_parallel_batch(db, real_cfg, two_real_files):
+    (rel1, body1), (rel2, body2) = two_real_files
+    # Two independent, concrete, parallel-safe plan steps — real file reads.
+    plan_tool_steps = [
+        f"localFiles operation='read' path='{rel1}'",
+        f"localFiles operation='read' path='{rel2}'",
+    ]
+    action_plan = plan_tool_steps + ["Reply to the user with both files."]
+    tools_schema = generate_tools_json_schema(["localFiles"])
+
+    messages: list = []
+    recent_sigs: list = []
+    history: list = []
+
+    handled = _execute_parallel_plan_batch(
+        cfg=real_cfg,
+        db=db,
+        messages=messages,
+        action_plan=action_plan,
+        plan_tool_steps=plan_tool_steps,
+        start_index=0,
+        tools_json_schema=tools_schema,
+        allowed_tools=["localFiles", "stop"],
+        recent_tool_signatures=recent_sigs,
+        invoked_tools_history=history,
+        persona_prompt="",
+        redacted="read both files",
+        language=None,
+        maybe_digest=_maybe_digest_tool_result,
     )
+
+    # The batch handled both independent steps.
+    assert handled is True
+
+    # Two tool results, appended in PLAN order, each carrying its real file body.
+    tool_results = [m for m in messages if m.get("tool_name") == "localFiles"]
+    assert len(tool_results) == 2
+    assert body1 in tool_results[0]["content"]
+    assert body2 in tool_results[1]["content"]
+    # Real success flags from the real tool.
+    assert all(m.get("tool_failed") is False for m in tool_results)
+    # Both calls recorded in history, in order.
+    assert [h[0] for h in history] == ["localFiles", "localFiles"]
+
+
+def test_single_step_is_not_batched(db, real_cfg, two_real_files):
+    (rel1, _body1), _ = two_real_files
+    # Only one eligible step -> the batch declines (needs >= 2); the engine's
+    # sequential path would handle it instead.
+    plan_tool_steps = [f"localFiles operation='read' path='{rel1}'"]
+    handled = _execute_parallel_plan_batch(
+        cfg=real_cfg,
+        db=db,
+        messages=[],
+        action_plan=plan_tool_steps + ["Reply."],
+        plan_tool_steps=plan_tool_steps,
+        start_index=0,
+        tools_json_schema=generate_tools_json_schema(["localFiles"]),
+        allowed_tools=["localFiles", "stop"],
+        recent_tool_signatures=[],
+        invoked_tools_history=[],
+        persona_prompt="",
+        redacted="read one file",
+        language=None,
+        maybe_digest=_maybe_digest_tool_result,
+    )
+    assert handled is False

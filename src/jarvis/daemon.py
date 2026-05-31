@@ -315,8 +315,15 @@ def main() -> None:
     cfg = load_settings()
     db = Database(cfg.db_path, cfg.sqlite_vss_path)
 
+    # Select the inference backend (Ollama native or any local OpenAI-compatible
+    # server) before any LLM call is made. Process-global, like the MCP cache.
+    from .llm import configure_llm_backend
+    configure_llm_backend(getattr(cfg, "llm_backend", "ollama"), getattr(cfg, "llm_api_key", ""))
+
     debug_log("daemon started", "jarvis")
     print("✓ Daemon started", flush=True)
+    if getattr(cfg, "llm_backend", "ollama") != "ollama":
+        print(f"🔌 LLM backend: {cfg.llm_backend} @ {cfg.ollama_base_url}", flush=True)
     print(f"🧠 Using chat model: {cfg.ollama_chat_model}", flush=True)
     print(f"🎤 Using whisper model: {cfg.whisper_model}", flush=True)
 

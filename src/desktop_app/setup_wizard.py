@@ -158,25 +158,25 @@ def check_ollama_cli() -> Tuple[bool, Optional[str]]:
 
 def check_ollama_server() -> Tuple[bool, Optional[str]]:
     """
-    Check if Ollama server is running.
-    Returns (is_running, version).
+    Check whether the configured inference server is reachable.
+    Returns (is_running, detail) where detail is the Ollama version or, for an
+    OpenAI-compatible backend, a short status string.
     """
     try:
         cfg = load_settings()
         base_url = cfg.ollama_base_url
+        backend = getattr(cfg, "llm_backend", "ollama")
+        api_key = getattr(cfg, "llm_api_key", "")
     except Exception:
         base_url = "http://127.0.0.1:11434"
+        backend = "ollama"
+        api_key = ""
 
     try:
-        response = requests.get(f"{base_url}/api/version", timeout=5)
-        if response.status_code == 200:
-            data = response.json()
-            version = data.get("version", "unknown")
-            return True, version
+        from jarvis.llm import health_check
+        return health_check(backend, base_url, api_key, timeout_sec=5.0)
     except Exception:
-        pass
-
-    return False, None
+        return False, None
 
 
 def get_required_models() -> List[str]:
