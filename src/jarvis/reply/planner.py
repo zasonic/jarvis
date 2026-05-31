@@ -625,6 +625,106 @@ def _parse_plan_step_concrete(
     return name, _normalise_url_args(args)
 
 
+def _allowed_from_schema(
+    tools_schema: Sequence[dict],
+) -> Tuple[List[str], dict]:
+    """Extract ``(allowed_names, allowed_props)`` from a tools JSON schema.
+
+    ``allowed_props`` maps each tool name to the set of its declared
+    JSON-schema property keys (empty set when the tool declares none).
+    Mirrors the parse inside :func:`resolve_next_tool_call` so the
+    deterministic concrete-step parser sees an identical view of the
+    catalogue.
+    """
+    allowed_names: List[str] = []
+    allowed_props: dict[str, set] = {}
+    for entry in tools_schema:
+        fn = entry.get("function", {}) if isinstance(entry, dict) else {}
+        name = fn.get("name") if isinstance(fn, dict) else None
+        if not name:
+            continue
+        allowed_names.append(str(name))
+        params = (fn.get("parameters") or {}) if isinstance(fn, dict) else {}
+        props = params.get("properties") if isinstance(params, dict) else None
+        allowed_props[str(name)] = (
+            set(props.keys()) if isinstance(props, dict) else set()
+        )
+    return allowed_names, allowed_props
+
+
+def _step_signature(name: str, args: dict) -> Tuple[str, str]:
+    """Stable ``(name, args_json)`` signature for dedup, matching the engine.
+
+    The engine keys ``recent_tool_signatures`` on the same shape, so a
+    batch member that collides with an already-executed call (or with an
+    earlier member of the same batch) can be detected before dispatch.
+    """
+    try:
+        return name, json.dumps(args or {}, sort_keys=True, ensure_ascii=False)
+    except Exception:
+        return name, "__unserializable__"
+
+
+def select_parallel_batch(
+    plan_tool_steps: Sequence[str],
+    start_index: int,
+    tools_schema: Sequence[dict],
+    parallel_safe_names: "set[str] | frozenset[str]",
+    existing_sigs: Sequence[Tuple[str, str]],
+    *,
+    max_batch: int,
+) -> List[Tuple[str, dict]]:
+    """Select a leading run of independent, parallel-safe plan tool steps.
+
+    Walks ``plan_tool_steps`` from ``start_index`` and greedily collects
+    steps that can all run concurrently. A step qualifies only when:
+
+    - it resolves via the deterministic concrete fast-path
+      (:func:`_parse_plan_step_concrete`) — which means it carries no
+      ``<placeholder>`` and therefore cannot reference a prior result, so
+      it is independent of every other step and of all prior calls;
+    - its tool is in the catalogue **and** in ``parallel_safe_names``;
+    - it is not ``toolSearchTool`` / ``stop`` (control tools, never batched);
+    - its signature is not already in ``existing_sigs`` (already executed)
+      nor duplicated earlier in this batch.
+
+    The scan **stops at the first step that fails any check** rather than
+    skipping it, so the parallel batch is always a contiguous prefix and
+    the dependent / sequential tail is left untouched for the engine's
+    one-step-per-turn path. Returns ``[]`` when fewer than two steps
+    qualify — a single step gains nothing from parallelism and should use
+    the existing sequential path unchanged.
+
+    Pure and side-effect-free: no LLM calls, no I/O. The engine wraps the
+    returned ``[(name, args), ...]`` in concurrent dispatch.
+    """
+    if max_batch < 2:
+        return []
+    allowed_names, allowed_props = _allowed_from_schema(tools_schema)
+    existing = set(existing_sigs)
+    batch: List[Tuple[str, dict]] = []
+    batch_sigs: set = set()
+    for i in range(start_index, len(plan_tool_steps)):
+        if len(batch) >= max_batch:
+            break
+        parsed = _parse_plan_step_concrete(
+            plan_tool_steps[i], allowed_names, allowed_props,
+        )
+        if parsed is None:
+            break
+        name, args = parsed
+        if name in ("toolSearchTool", "stop"):
+            break
+        if name not in parallel_safe_names:
+            break
+        sig = _step_signature(name, args)
+        if sig in existing or sig in batch_sigs:
+            break
+        batch.append((name, args))
+        batch_sigs.add(sig)
+    return batch if len(batch) >= 2 else []
+
+
 def resolve_next_tool_call(
     cfg,
     next_step_text: str,
@@ -793,6 +893,7 @@ __all__ = [
     "format_plan_block",
     "progress_nudge",
     "resolve_next_tool_call",
+    "select_parallel_batch",
     "tool_steps_of",
     "tool_names_in_plan",
     "plan_has_unresolved_tool_steps",

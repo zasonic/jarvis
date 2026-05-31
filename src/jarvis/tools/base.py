@@ -70,6 +70,23 @@ class Tool(ABC):
         """JSON Schema for tool arguments (matches MCP format)."""
         pass
 
+    @property
+    def parallel_safe(self) -> bool:
+        """Whether this tool is safe to run concurrently with other tools.
+
+        A tool is parallel-safe only when it is side-effect-free with
+        respect to shared mutable state: it must not write to the shared
+        SQLite ``db``, mutate global caches, or depend on another tool's
+        result. Such tools (read-only network/IO lookups) can be dispatched
+        in a single concurrent batch by the planner's direct-exec path.
+
+        Defaults to ``False`` so tools opt in explicitly — anything that
+        touches the database or has side effects stays sequential, which is
+        always correct if slower. The planner only ever parallelises tools
+        that override this to ``True``.
+        """
+        return False
+
     @abstractmethod
     def run(self, args: Optional[Dict[str, Any]], context: ToolContext) -> ToolExecutionResult:
         """Execute the tool with the given arguments and context.

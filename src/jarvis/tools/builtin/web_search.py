@@ -604,6 +604,12 @@ def _wikipedia_summary(
 class WebSearchTool(Tool):
     """Tool for performing web searches using DuckDuckGo."""
 
+    # Read-only network lookup with no shared-DB writes — safe to run in a
+    # concurrent planner batch alongside other parallel-safe tools.
+    @property
+    def parallel_safe(self) -> bool:
+        return True
+
     @property
     def name(self) -> str:
         return "webSearch"

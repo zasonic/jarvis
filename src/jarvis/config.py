@@ -237,6 +237,15 @@ class Settings:
     # the critical path — a long timeout would dominate first-token
     # latency for every query. Planner fails open on timeout.
     planner_timeout_sec: float
+    # Whether the planner's direct-exec path may run a leading run of
+    # independent, side-effect-free tool steps concurrently instead of
+    # one-per-turn. True = parallelise eligible steps; False = legacy
+    # strictly-sequential dispatch. Fails open to sequential on any error.
+    planner_parallel_enabled: bool
+    # Upper bound on how many tool steps run concurrently in a single
+    # parallel batch. Caps fan-out so a long plan can't open an unbounded
+    # number of network connections at once.
+    planner_parallel_max: int
 
     # Location Services
     location_enabled: bool
@@ -550,6 +559,8 @@ def get_default_config() -> Dict[str, Any]:
         "planner_model": "",
         "planner_enabled": True,
         "planner_timeout_sec": 6.0,
+        "planner_parallel_enabled": True,
+        "planner_parallel_max": 4,
 
         # Stop Commands
         "stop_commands": ["stop", "quiet", "shush", "silence", "enough", "shut up"],
@@ -776,6 +787,16 @@ def load_settings() -> Settings:
         planner_timeout_sec = float(merged.get("planner_timeout_sec", 6.0))
     except (TypeError, ValueError):
         planner_timeout_sec = 6.0
+    planner_parallel_enabled = bool(merged.get("planner_parallel_enabled", True))
+    try:
+        planner_parallel_max = int(merged.get("planner_parallel_max", 4))
+    except (TypeError, ValueError):
+        planner_parallel_max = 4
+    # A batch needs at least two steps to be worth parallelising; clamp
+    # to a sane floor so a misconfigured 0/1 disables fan-out cleanly
+    # rather than erroring.
+    if planner_parallel_max < 1:
+        planner_parallel_max = 1
     try:
         tool_search_max_calls = int(merged.get("tool_search_max_calls", 3))
     except (TypeError, ValueError):
@@ -936,6 +957,8 @@ def load_settings() -> Settings:
         planner_model=planner_model,
         planner_enabled=planner_enabled,
         planner_timeout_sec=planner_timeout_sec,
+        planner_parallel_enabled=planner_parallel_enabled,
+        planner_parallel_max=planner_parallel_max,
 
         # Location Services
         location_enabled=location_enabled,

@@ -10,6 +10,13 @@ from ..types import ToolExecutionResult
 class LocalFilesTool(Tool):
     """Tool for safe local file operations within user's home directory."""
 
+    # Read-only filesystem search/read within the home directory, no
+    # shared-DB writes — safe to run in a concurrent planner batch alongside
+    # other parallel-safe tools.
+    @property
+    def parallel_safe(self) -> bool:
+        return True
+
     @property
     def name(self) -> str:
         return "localFiles"

@@ -34,8 +34,10 @@ from .planner import (
     memory_topic_of,
     is_search_memory_step,
     resolve_next_tool_call as _resolve_plan_step,
+    select_parallel_batch,
 )
 from ..tools.selection import select_tools, ToolSelectionStrategy
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import json
 import re
 import uuid
@@ -771,6 +773,165 @@ def _build_enrichment_context_hint(cfg, recent_messages: list) -> Optional[str]:
         if lines:
             parts.append("Recent dialogue (short-term memory):\n" + "\n".join(lines))
     return "\n\n".join(parts) if parts else None
+
+
+def _execute_parallel_plan_batch(
+    *,
+    cfg,
+    db,
+    messages: list,
+    action_plan: "list[str]",
+    plan_tool_steps: "list[str]",
+    start_index: int,
+    tools_json_schema: list,
+    allowed_tools: list,
+    recent_tool_signatures: list,
+    invoked_tools_history: list,
+    persona_prompt: str,
+    redacted: str,
+    language: Optional[str],
+    maybe_digest,
+) -> bool:
+    """Dispatch a leading run of independent, parallel-safe plan steps at once.
+
+    Selects the batch with :func:`select_parallel_batch` (a contiguous prefix
+    of concrete, side-effect-free, non-duplicate steps), runs them concurrently
+    on a thread pool, then appends their results to ``messages`` **in plan
+    order** (not completion order) so downstream synthesis and dedup stay
+    deterministic. The appended message shape is identical to the sequential
+    direct-exec path: an assistant ``tool_calls`` message followed by a
+    ``[Tool result: …]`` user message carrying ``tool_name`` / ``tool_failed``.
+
+    Mutates ``messages``, ``recent_tool_signatures`` and
+    ``invoked_tools_history`` in place. Returns ``True`` when a batch ran (the
+    caller should ``continue`` the turn loop), ``False`` when nothing was
+    batched or anything failed — in which case the caller falls through to the
+    sequential single-step path, so behaviour is never worse than before.
+
+    Only tools whose builtin declares ``parallel_safe`` are ever eligible; MCP
+    tools and DB-writing tools (any name not in ``BUILTIN_TOOLS`` or with the
+    default ``parallel_safe=False``) are excluded, so concurrent dispatch never
+    races on the shared SQLite ``db``.
+    """
+    try:
+        parallel_safe_names = {
+            n for n in allowed_tools
+            if n in BUILTIN_TOOLS and BUILTIN_TOOLS[n].parallel_safe
+        }
+        if not parallel_safe_names:
+            return False
+        batch = select_parallel_batch(
+            plan_tool_steps,
+            start_index,
+            tools_json_schema,
+            parallel_safe_names,
+            list(recent_tool_signatures),
+            max_batch=int(getattr(cfg, "planner_parallel_max", 4)),
+        )
+    except Exception as exc:  # pragma: no cover — defensive
+        debug_log(f"planner: parallel batch selection failed — {exc}", "planning")
+        return False
+
+    if len(batch) < 2:
+        return False
+
+    first_n = start_index + 1
+    last_n = start_index + len(batch)
+    print(
+        f"    🗺️ Plan steps {first_n}–{last_n} → parallel direct-exec "
+        f"({len(batch)} tools)",
+        flush=True,
+    )
+
+    def _run_one(idx: int, name: str, args: dict):
+        return idx, run_tool_with_retries(
+            db=db,
+            cfg=cfg,
+            tool_name=name,
+            tool_args=args,
+            system_prompt=persona_prompt,
+            original_prompt="",
+            redacted_text=redacted,
+            max_retries=1,
+            language=language,
+        )
+
+    results: "list" = [None] * len(batch)
+    try:
+        with ThreadPoolExecutor(max_workers=len(batch)) as pool:
+            futures = [
+                pool.submit(_run_one, i, name, args)
+                for i, (name, args) in enumerate(batch)
+            ]
+            for fut in as_completed(futures):
+                idx, res = fut.result()
+                results[idx] = res
+    except Exception as exc:  # pragma: no cover — defensive
+        debug_log(f"planner: parallel batch dispatch failed — {exc}", "planning")
+        return False
+
+    if any(r is None for r in results):
+        debug_log("planner: parallel batch had a missing result — falling back", "planning")
+        return False
+
+    # Append every result in PLAN ORDER. The progress nudge is attached only to
+    # the final result so the chat model sees a single accurate remainder hint
+    # for the whole batch rather than one per tool.
+    total_after = start_index + len(batch)
+    for offset, ((name, args), result) in enumerate(zip(batch, results)):
+        try:
+            args_json = json.dumps(args or {}, sort_keys=True, ensure_ascii=False)
+        except Exception:
+            args_json = "__unserializable__"
+        signature = (name, args_json)
+
+        if result.reply_text:
+            text = maybe_digest(
+                cfg=cfg,
+                query=redacted,
+                tool_name=name,
+                raw_tool_result=result.reply_text,
+            )
+        else:
+            err = result.error_message or "(no result)"
+            err_preview = err if len(err) <= 240 else err[:237] + "..."
+            print(f"    ❌ {name} error: {err_preview}", flush=True)
+            text = f"Error: {err}"
+
+        call_id = f"call_plan_{uuid.uuid4().hex[:8]}"
+        messages.append({
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{
+                "id": call_id,
+                "type": "function",
+                "function": {"name": name, "arguments": args},
+            }],
+        })
+
+        is_last = offset == len(batch) - 1
+        hint = progress_nudge(action_plan, total_after) if (is_last and action_plan) else ""
+        messages.append({
+            "role": "user",
+            "content": f"[Tool result: {name}]\n{text}{hint}",
+            "tool_name": name,
+            "tool_failed": not result.success,
+        })
+
+        recent_tool_signatures.append(signature)
+        invoked_tools_history.append((name, args_json, text))
+
+    # Trim the signature ring in place (mirrors the sequential path's cap of 5)
+    # without rebinding the caller's list reference.
+    if len(recent_tool_signatures) > 5:
+        recent_tool_signatures[:] = recent_tool_signatures[-5:]
+
+    debug_log(
+        f"planner: parallel-executed steps {first_n}–{last_n} "
+        f"({', '.join(n for n, _ in batch)})",
+        "planning",
+    )
+    return True
 
 
 def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
@@ -1757,6 +1918,44 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
                 - _plan_steps_baseline
             )
             if 0 <= _tool_results_so_far < len(_plan_tool_steps):
+                # Parallel batch fast-path. When the next several plan steps
+                # are independent (concrete fast-path ⇒ no <placeholder> ⇒ no
+                # dependence on a prior result) and every tool is parallel-safe,
+                # dispatch them concurrently rather than one-per-turn. This cuts
+                # wall-clock from sum(step latencies) to ~max(step latencies)
+                # for IO-bound tools (webSearch, getWeather, …). The single
+                # local model is never the bottleneck here — the concrete
+                # fast-path resolves these steps with zero LLM calls — so only
+                # the network round-trips overlap. Fails open: any error falls
+                # through to the sequential single-step path below.
+                # See planner.spec.md → "Parallel batch execution".
+                if getattr(cfg, "planner_parallel_enabled", True):
+                    try:
+                        _batched = _execute_parallel_plan_batch(
+                            cfg=cfg,
+                            db=db,
+                            messages=messages,
+                            action_plan=action_plan,
+                            plan_tool_steps=_plan_tool_steps,
+                            start_index=_tool_results_so_far,
+                            tools_json_schema=tools_json_schema or [],
+                            allowed_tools=allowed_tools,
+                            recent_tool_signatures=recent_tool_signatures,
+                            invoked_tools_history=invoked_tools_history,
+                            persona_prompt=_persona_prompt,
+                            redacted=redacted,
+                            language=language,
+                            maybe_digest=_maybe_digest_tool_result,
+                        )
+                    except Exception as _pbe:  # pragma: no cover — defensive
+                        debug_log(
+                            f"planner: parallel batch helper raised — "
+                            f"falling back to sequential ({_pbe})",
+                            "planning",
+                        )
+                        _batched = False
+                    if _batched:
+                        continue
                 _plan_exec_handled = False
                 try:
                     _prior = list(invoked_tools_history)

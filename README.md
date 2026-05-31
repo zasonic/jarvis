@@ -235,13 +235,15 @@ Both thresholds are exposed in the Settings window under *Whisper*.
 
 **Tool Router** - When `"tool_selection_strategy": "llm"` (the default), Jarvis asks a small LLM to pick which tools are relevant for each query, shrinking the tool catalogue the chat model sees. By default this routing call reuses the intent-judge model — it's already warm and small enough not to stall the turn. Override with `"tool_router_model": "<name>"` to dedicate a different model to routing. Other strategies: `"keyword"` (fast, no LLM), `"embedding"` (nomic-embed-text), `"all"` (no filtering).
 
-**Task-list Planner** - Before the agentic loop, Jarvis runs a short planning pass that decomposes multi-step queries into an ordered list of sub-tasks. For small models (`gemma4:e2b` class), each planned step is directly resolved to a concrete tool call without relying on the chat model to re-plan turn-by-turn. This significantly improves multi-step reliability. Config options:
+**Task-list Planner** - Before the agentic loop, Jarvis runs a short planning pass that decomposes multi-step queries into an ordered list of sub-tasks. For small models (`gemma4:e2b` class), each planned step is directly resolved to a concrete tool call without relying on the chat model to re-plan turn-by-turn. This significantly improves multi-step reliability. Independent lookups (for example, "what's the weather and what's the news?") are dispatched concurrently, so a combined question is answered about as fast as a single one. Config options:
 
 ```json
 {
   "planner_enabled": true,          // set to false to disable the planner entirely
   "planner_model": "",              // override which model plans (default: reuses tool_router_model chain)
-  "planner_timeout_sec": 6.0        // per-call timeout for plan and step-resolver LLM calls
+  "planner_timeout_sec": 6.0,       // per-call timeout for plan and step-resolver LLM calls
+  "planner_parallel_enabled": true, // run independent lookups (e.g. weather + web search) concurrently
+  "planner_parallel_max": 4         // max tool steps dispatched at once (set 1 to disable batching)
 }
 ```
 

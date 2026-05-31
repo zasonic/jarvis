@@ -186,6 +186,52 @@ The engine consumes the plan in two phases.
   request `num_ctx=8192` from Ollama so enriched memory and tool
   catalogue don't silently truncate in the 4096-token default window.
 
+### Parallel batch execution
+
+For small-model direct-exec, the engine may dispatch a **leading run of
+independent, side-effect-free plan steps concurrently** instead of one
+per turn. This cuts wall-clock from the sum of the steps' latencies to
+roughly the slowest single step for IO-bound tools (web search, weather,
+page fetch). The single local model is never the bottleneck — the
+concrete fast-path resolves these steps with zero LLM calls — so only the
+network round-trips overlap.
+
+- `select_parallel_batch(plan_tool_steps, start_index, tools_schema,
+  parallel_safe_names, existing_sigs, *, max_batch)` (pure, no I/O)
+  greedily collects a **contiguous prefix** of steps starting at
+  `start_index` that can all run together. A step qualifies only when:
+  - it resolves via `_parse_plan_step_concrete` — i.e. it carries no
+    `<placeholder>`, so it cannot reference a prior result and is
+    therefore independent of every other step and of all prior calls;
+  - its tool is in the catalogue **and** in `parallel_safe_names`;
+  - it is not `toolSearchTool` / `stop` (control tools never batch);
+  - its `(name, args_json)` signature is not already in `existing_sigs`
+    (already executed) nor duplicated earlier in the batch.
+  The scan **stops at the first step that fails any check** rather than
+  skipping it, so the dependent / sequential tail is left untouched for
+  the one-step-per-turn path. Returns `[]` when fewer than two steps
+  qualify (a single step gains nothing from parallelism).
+- **Parallel-safe is opt-in.** `Tool.parallel_safe` defaults to `False`;
+  only read-only, DB-free, network/IO builtins override it to `True`
+  (`webSearch`, `fetchWebPage`, `getWeather`, `screenshot`, `localFiles`).
+  Nutrition writers, control tools, and **all MCP tools** stay sequential,
+  so concurrent dispatch never races on the shared SQLite `db`.
+- The engine helper `_execute_parallel_plan_batch` runs the batch on a
+  `ThreadPoolExecutor`, then appends results **in plan order** (not
+  completion order) so synthesis and dedup stay deterministic. Each result
+  produces the same message shape as the sequential path (assistant
+  `tool_calls` + `[Tool result: …]` user message with `tool_name` /
+  `tool_failed`), updates `recent_tool_signatures` and
+  `invoked_tools_history`, and a single `progress_nudge` is attached to the
+  final result of the batch.
+- Gated by `cfg.planner_parallel_enabled` (default `True`) and capped by
+  `cfg.planner_parallel_max` (default 4; values < 2 disable batching).
+- **Fail-open.** Selection error, dispatch error, a missing result, or
+  `< 2` eligible steps → the helper returns `False` and the engine falls
+  through to the unchanged sequential single-step path. Parallel execution
+  never changes which tool calls are made or their arguments — only their
+  timing — so it can never make a turn worse than sequential.
+
 ## Fail-open invariants
 
 - Timeout, empty response, or exception in the planner LLM call →
@@ -202,6 +248,8 @@ The engine consumes the plan in two phases.
 | `planner_enabled` | `True` | Feature gate. |
 | `planner_model` | `""` | Explicit planner model override. |
 | `planner_timeout_sec` | `6.0` | Timeout for plan and step-resolver LLM calls. |
+| `planner_parallel_enabled` | `True` | Allow concurrent dispatch of independent, parallel-safe leading plan steps. |
+| `planner_parallel_max` | `4` | Max tool steps per concurrent batch (values < 2 disable batching). |
 
 ## Non-goals
 

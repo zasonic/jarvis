@@ -58,6 +58,13 @@ original transport failure is reported.
 - `scrapling_solve_cloudflare` (bool, default `false`): allow the stealth stage
   to solve Cloudflare challenges (slower, more conspicuous).
 
+### Concurrency
+
+`fetchWebPage` declares `parallel_safe = True`: a read-only network fetch
+with no shared-DB writes, so the planner's direct-exec path may dispatch it
+concurrently with other parallel-safe steps in one turn (see
+`src/jarvis/reply/planner.spec.md` → "Parallel batch execution").
+
 ### Behavioural guarantees for tests
 
 1. **Flag off**: byte-for-byte identical to the pre-escalation behaviour;

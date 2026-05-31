@@ -120,6 +120,12 @@ WMO_CODES = {
 class WeatherTool(Tool):
     """Tool for getting current weather using Open-Meteo API."""
 
+    # Read-only network lookup with no shared-DB writes — safe to run in a
+    # concurrent planner batch alongside other parallel-safe tools.
+    @property
+    def parallel_safe(self) -> bool:
+        return True
+
     @property
     def name(self) -> str:
         return "getWeather"

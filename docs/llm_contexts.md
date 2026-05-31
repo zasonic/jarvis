@@ -165,6 +165,7 @@ Every distinct LLM call in Jarvis, what feeds it, what consumes it, and how it i
 - **System prompt**: `_STEP_RESOLVER_SYSTEM` at [planner.py:300](src/jarvis/reply/planner.py:300). Teaches one-JSON-object output, placeholder substitution from prior results, `null` for synthesis steps.
 - **Output**: `(tool_name, arguments)` tuple or `None`. Unknown tool names are rejected via the allow-list guard.
 - **Limits**: `planner_timeout_sec`. Fail-open → `None` (engine falls back to the chat-model turn).
+- **Parallel batch (no new LLM context)**: before this per-step resolve, the engine may select a contiguous leading run of independent, `parallel_safe` steps via `select_parallel_batch()` and dispatch them **concurrently** in one turn (`_execute_parallel_plan_batch`). Those steps go through the concrete fast-path, so the batch adds **zero LLM calls** — only the IO-bound tool round-trips overlap. Gated by `planner_parallel_enabled` / `planner_parallel_max`; fails open to this sequential resolver. See `planner.spec.md` → "Parallel batch execution".
 
 ## 14. Tool-specific LLM calls
 

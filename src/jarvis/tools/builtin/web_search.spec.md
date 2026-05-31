@@ -113,6 +113,13 @@ and larger models confabulate specifics from prior knowledge while claiming
 they couldn't fetch. Assertive language ("you have failed") is required —
 a softer "please don't invent" lets chatty larger models wriggle past.
 
+### Concurrency
+
+`webSearch` declares `parallel_safe = True`: it is a read-only network
+lookup with no shared-DB writes, so the planner's direct-exec path may
+dispatch it concurrently with other parallel-safe steps in one turn (see
+`src/jarvis/reply/planner.spec.md` → "Parallel batch execution").
+
 ### Wall-clock budget
 
 The whole provider chain (DDG + Brave + Wikipedia) is capped by
