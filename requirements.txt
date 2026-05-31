@@ -11,6 +11,12 @@ html2text>=2020.1.16
 # scrapling_fetch_enabled: true in config:
 #   pip install "scrapling[fetchers]>=0.4.8" && scrapling install
 # For the full crawling toolset over MCP instead, use: pip install "scrapling[ai]"
+# Optional: cloud-optional long-term memory backend (opt-in, off by default).
+# Local memory is the default and works fully offline. To enable mirroring
+# Jarvis's scrubbed diary/facts to supermemory and merging its recall into
+# replies, install the SDK and set supermemory_enabled: true plus an API key
+# (or the SUPERMEMORY_API_KEY env var) in config:
+#   pip install supermemory
 numpy<2.0.0
 faster-whisper==1.0.3
 setuptools<81

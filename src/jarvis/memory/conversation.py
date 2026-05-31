@@ -1181,12 +1181,17 @@ def update_daily_conversation_summary(
     timeout_sec: float = 30.0,
     on_token: Optional[Callable[[str], None]] = None,
     thinking: bool = False,
+    cfg=None,
 ) -> Optional[int]:
     """
     Update the conversation summary for today with new chunks.
 
     Args:
         on_token: Optional callback for streaming tokens (for live UI updates)
+        cfg: Optional Settings. When supplied with supermemory enabled, the
+            scrubbed daily summary is mirrored to the opt-in cloud backend.
+            Default None preserves the local-only behaviour for all existing
+            callers.
 
     Returns the summary ID if successful, None otherwise.
     """
@@ -1262,6 +1267,13 @@ def update_daily_conversation_summary(
             vec = get_embedding(text_for_embedding, ollama_base_url, ollama_embed_model, timeout_sec=15.0)  # Use shorter timeout for embeddings
             if vec is not None:
                 db.upsert_summary_embedding(summary_id, vec)
+
+        # Mirror the scrubbed summary to the opt-in supermemory backend. No-op
+        # (and no network) unless cfg enables it; failures never affect the
+        # local diary write above.
+        if cfg is not None and getattr(cfg, "supermemory_mirror_writes", True):
+            from . import supermemory_backend
+            supermemory_backend.mirror_diary_summary(cfg, summary, topics, today)
 
         return summary_id
 
@@ -1555,6 +1567,7 @@ def update_diary_from_dialogue_memory(
     on_token: Optional[Callable[[str], None]] = None,
     thinking: bool = False,
     graph_picker_model: Optional[str] = None,
+    cfg=None,
 ) -> Optional[int]:
     """
     Update the diary with pending interactions from dialogue memory.
@@ -1608,6 +1621,7 @@ def update_diary_from_dialogue_memory(
             timeout_sec=timeout_sec,
             on_token=on_token,
             thinking=thinking,
+            cfg=cfg,
         )
 
         debug_log(f"update_daily_conversation_summary returned: {summary_id}", "memory")
@@ -1688,6 +1702,18 @@ def update_diary_from_dialogue_memory(
                         f"{skipped} duplicates skipped",
                         "memory",
                     )
+
+                    # Mirror each newly stored fact to the opt-in supermemory
+                    # backend. No-op / no network unless enabled; failures stay
+                    # inside this already-non-fatal graph block.
+                    if (
+                        cfg is not None
+                        and getattr(cfg, "supermemory_mirror_writes", True)
+                        and stored
+                    ):
+                        from . import supermemory_backend
+                        for fact, node_name in stored:
+                            supermemory_backend.mirror_graph_fact(cfg, fact, node_name)
             except Exception as e:
                 debug_log(f"graph memory update failed (non-fatal): {e}", "memory")
 

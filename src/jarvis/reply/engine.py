@@ -1346,6 +1346,21 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
                 voice_debug=cfg.voice_debug,
                 max_results=cfg.memory_enrichment_max_results
             )
+            # Merge opt-in supermemory recall into the same diary results. The
+            # remote hits carry a [YYYY-MM-DD] prefix, so the merge re-sorts
+            # newest-first and the digest pass treats them identically. No-op
+            # (and no network) unless the user enabled supermemory with a key.
+            from ..memory import supermemory_backend
+            if supermemory_backend.is_enabled(cfg):
+                sm_query = " ".join(keywords) if keywords else redacted
+                sm_hits = supermemory_backend.search_memories(
+                    cfg, sm_query, max_results=cfg.memory_enrichment_max_results
+                )
+                if sm_hits:
+                    context_results = supermemory_backend.merge_memory_results(
+                        context_results, sm_hits, cfg.memory_enrichment_max_results
+                    )
+                    debug_log(f"supermemory diary: merged {len(sm_hits)} remote hits", "memory")
             if context_results:
                 raw_diary_entries = list(context_results)
                 conversation_context = "\n".join(context_results)
@@ -1406,6 +1421,19 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
                             matched_q = _match_question(data_preview, questions)
                             node_annotations.append((node.name or path.split(" > ")[-1], matched_q))
                             debug_log(f"graph hit: [{path}] ({node.data_token_count} tokens)", "memory")
+
+                # Merge opt-in supermemory profile facts into the same block.
+                # Runs regardless of the local <2-content-word skip above so
+                # remote facts can still surface. No-op / no network when the
+                # user has not enabled supermemory.
+                from ..memory import supermemory_backend
+                if supermemory_backend.is_enabled(cfg):
+                    sm_profile = supermemory_backend.fetch_profile_facts(
+                        cfg, questions, max_results=cfg.memory_enrichment_max_results
+                    )
+                    if sm_profile:
+                        graph_parts.extend(sm_profile)
+                        debug_log(f"supermemory profile: merged {len(sm_profile)} facts", "memory")
 
                 if graph_parts:
                     raw_graph_parts = list(graph_parts)

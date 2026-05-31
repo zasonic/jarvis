@@ -294,6 +294,29 @@ def _build_field_metadata() -> List[FieldMeta]:
     f("agentic_max_turns", "Agentic Max Turns",
       "Maximum turns in agentic tool-use loops",
       "memory", "int", min_val=1, max_val=30)
+    f("supermemory_enabled", "Supermemory (cloud memory)",
+      "Opt-in. Off by default and fully offline. When on (and a key is set), "
+      "Jarvis mirrors its scrubbed diary/facts to supermemory and merges its "
+      "recall into replies. Nothing leaves the device unless this is enabled.",
+      "memory", "bool")
+    f("supermemory_api_key", "Supermemory API Key",
+      "API key from console.supermemory.ai (or your self-hosted instance). "
+      "Required to enable the cloud memory backend; can also be set via the "
+      "SUPERMEMORY_API_KEY environment variable.",
+      "memory", "str", nullable=True)
+    f("supermemory_base_url", "Supermemory Base URL",
+      "Leave empty for the hosted API (https://api.supermemory.ai). Set this "
+      "to point at a self-hosted supermemory instance so no data leaves your "
+      "own infrastructure.",
+      "memory", "str", nullable=True)
+    f("supermemory_container_tag", "Supermemory Container Tag",
+      "Isolation namespace for this user's memories (leave empty for a "
+      "stable default).",
+      "memory", "str", nullable=True)
+    f("supermemory_mirror_writes", "Mirror Memory Writes",
+      "When supermemory is enabled, also push new diary summaries and facts "
+      "up to it. Turn off to use supermemory for recall only.",
+      "memory", "bool")
 
     # --- Location ---
     f("location_enabled", "Enable Location",

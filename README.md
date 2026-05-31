@@ -338,6 +338,46 @@ screenshots), add the Scrapling MCP server instead (see
 
 </details>
 
+<details>
+<summary><strong>Cloud memory (Supermemory) — opt-in, off by default</strong></summary>
+
+By default all memory is 100% local and nothing leaves your machine. This is
+the **only** optional cloud feature in Jarvis's memory layer, and it is **off
+unless you turn it on and supply a key**. When enabled, Jarvis mirrors its
+already-scrubbed diary summaries and learned facts to
+[Supermemory](https://supermemory.ai) and merges Supermemory's recall into
+replies, adding capabilities the local store doesn't have (automatic
+contradiction resolution, time-based forgetting, hybrid search across
+everything you've stored).
+
+⚠️ Enabling this sends memory off your device. Only text that has already passed
+Jarvis's redaction and diary scrub is mirrored — never raw transcripts. To keep
+everything on infrastructure you control, point `supermemory_base_url` at a
+self-hosted Supermemory instance.
+
+Install the SDK, then enable it:
+
+```bash
+pip install supermemory
+```
+
+```json
+{
+  "supermemory_enabled": true,            // off by default
+  "supermemory_api_key": "sm_...",        // or set SUPERMEMORY_API_KEY
+  "supermemory_base_url": "",             // empty = hosted API; set for self-host
+  "supermemory_container_tag": "",        // optional isolation namespace
+  "supermemory_mirror_writes": true       // false = use for recall only
+}
+```
+
+When disabled (the default), the package is never imported and no network call
+is ever made — behaviour is identical to a stock local install. On any network
+error Jarvis silently falls back to local memory, so a flaky connection never
+breaks a reply.
+
+</details>
+
 ## Dictation Mode — Free WisprFlow Alternative
 
 Hold a hotkey to record speech, release to paste the transcription into any app. Works everywhere — your editor, browser, chat, terminal. Completely local, completely free.
