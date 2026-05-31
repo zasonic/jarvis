@@ -320,6 +320,19 @@ def _build_field_metadata() -> List[FieldMeta]:
       "Use Wikipedia as a last-resort source when other search engines fail. "
       "No key, no account, privacy-light.",
       "features", "bool")
+    f("scrapling_fetch_enabled", "Scrapling Escalation",
+      "Optional. When a normal fetch returns nothing (JavaScript-heavy or "
+      "anti-bot pages), retry with a locally-installed Scrapling browser. "
+      "Off by default. Requires: pip install \"scrapling[fetchers]\" then "
+      "scrapling install.",
+      "features", "bool")
+    f("scrapling_binary", "Scrapling Binary",
+      "Path to the scrapling command (leave as 'scrapling' if it is on PATH).",
+      "features", "str", nullable=True)
+    f("scrapling_solve_cloudflare", "Solve Cloudflare",
+      "When escalating to Scrapling, attempt to solve Cloudflare challenges. "
+      "Slower and more conspicuous, so off by default.",
+      "features", "bool")
     f("tune_enabled", "Startup Tune",
       "Play startup sound",
       "features", "bool")

@@ -208,6 +208,13 @@ default.
   string means "not configured" — the tool skips straight to Wikipedia.
 - `wikipedia_fallback_enabled` (bool, default `true`): zero-config last
   resort. Set to `false` to disable the Wikipedia network call entirely.
+- `scrapling_fetch_enabled` (bool, default `false`): opt-in escalation. When a
+  cascade produces no usable extract (every fetch empty or zero-overlap
+  boilerplate), the candidates are retried through a locally-installed
+  Scrapling browser before the links-only envelope fires. Off by default, so
+  the cascade is pure-`requests` unless the user enables it. See
+  `scrapling_binary` and `scrapling_solve_cloudflare` in
+  `fetch_web_page.spec.md` for the shared escalation knobs.
 
 ### Behavioural guarantees for tests
 
@@ -248,6 +255,9 @@ Regression tests assert:
 - Unbounded provider plurality — the fallback chain is scoped to DDG →
   Brave (opt-in) → Wikipedia (zero-config). Adding Bing / Kagi / SearXNG
   or a user-pluggable provider registry is possible but out of scope.
-- JS rendering — we fetch raw HTML only. SPA-heavy pages may return
-  nothing useful; the cascade handles this by trying the next result.
+- JS rendering — the default cascade fetches raw HTML only. SPA-heavy pages
+  may return nothing useful; the cascade handles this by trying the next
+  result, and (when `scrapling_fetch_enabled` is set) by an opt-in
+  browser-rendered Scrapling retry of the candidates before the links-only
+  envelope fires. The default path remains raw-HTML and dependency-free.
 - User-agent rotation — a single desktop Chrome UA is used.
