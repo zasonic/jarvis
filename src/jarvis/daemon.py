@@ -47,6 +47,7 @@ _global_stop_requested: bool = False
 _warm_profile_graph_listener = None  # registered callback, kept for shutdown unregister
 _global_tts_engine = None  # TTS engine reference for face animation polling
 _global_dictation_engine = None  # Dictation engine reference for history UI
+_global_scheduler = None  # Background TaskScheduler reference for shutdown
 
 # Shutdown timeout for diary update (shorter than normal to allow reasonable quit time)
 # Desktop app's stop_daemon() should wait at least this long + buffer
@@ -303,7 +304,7 @@ def _check_and_update_diary(
 
 def main() -> None:
     """Main daemon entry point."""
-    global _global_dialogue_memory, _global_stop_requested, _global_tts_engine, _global_dictation_engine
+    global _global_dialogue_memory, _global_stop_requested, _global_tts_engine, _global_dictation_engine, _global_scheduler
     global _warm_profile_graph_listener
 
     # Reset stop flag at start (in case of restart)
@@ -554,6 +555,60 @@ def main() -> None:
     else:
         print("🎙️ Dictation disabled", flush=True)
 
+    # Background task scheduler (reminders / recurring updates / background jobs).
+    # Fires stored task prompts through the reply engine and speaks the result.
+    # Uses a dedicated DialogueMemory so scheduled runs never contaminate the
+    # live conversation's hot window. The listener is paused for the duration of
+    # an announcement (same mechanism as dictation) so Jarvis doesn't transcribe
+    # its own scheduled speech.
+    if bool(getattr(cfg, "scheduler_enabled", True)):
+        try:
+            from .scheduling.scheduler import TaskScheduler
+            from .reply.engine import run_reply_engine
+
+            _scheduler_memory = DialogueMemory(
+                inactivity_timeout=cfg.dialogue_memory_timeout,
+                max_interactions=20,
+            )
+
+            def _run_scheduled_task(task) -> None:
+                prompt = task["prompt"]
+                debug_log(f"scheduler: firing task #{task['id']}: {prompt[:80]}", "scheduler")
+                print(f"⏰ Running scheduled task #{task['id']}", flush=True)
+                reply = run_reply_engine(
+                    db=db, cfg=cfg, tts=None, text=prompt,
+                    dialogue_memory=_scheduler_memory, language=None,
+                )
+                if not reply or not (tts and getattr(tts, "enabled", False)):
+                    return
+                # Pause the listener so the announcement isn't heard as input,
+                # then speak and block this scheduler thread until done (tasks
+                # are sequential). A timeout guards against a missed callback.
+                done = threading.Event()
+
+                def _complete() -> None:
+                    if voice_thread is not None:
+                        voice_thread._dictation_active = False
+                    done.set()
+
+                if voice_thread is not None:
+                    voice_thread._dictation_active = True
+                try:
+                    tts.speak(reply, completion_callback=_complete)
+                    done.wait(timeout=120.0)
+                finally:
+                    if voice_thread is not None:
+                        voice_thread._dictation_active = False
+
+            _global_scheduler = TaskScheduler(db, cfg, _run_scheduled_task)
+            _global_scheduler.start()
+            print("⏰ Task scheduler started", flush=True)
+        except Exception as e:
+            debug_log(f"scheduler init failed: {e}", "scheduler")
+            print(f"  ⚠ Scheduler not available: {e}", flush=True)
+    else:
+        print("⏰ Task scheduler disabled", flush=True)
+
     # Periodic diary update checking
     last_diary_check = time.time()
     diary_check_interval = 60.0
@@ -606,7 +661,16 @@ def main() -> None:
         print("🔄 Daemon shutting down - saving memory...", flush=True)
         debug_log("daemon finally block starting - performing cleanup", "jarvis")
 
-        # Clean shutdown - stop dictation first
+        # Clean shutdown - stop the scheduler first so no new task fires mid-teardown
+        if _global_scheduler is not None:
+            debug_log("stopping task scheduler...", "jarvis")
+            try:
+                _global_scheduler.stop()
+            except Exception:
+                pass
+            debug_log("task scheduler stopped", "jarvis")
+
+        # Stop dictation next
         if dictation is not None:
             debug_log("stopping dictation engine...", "jarvis")
             dictation.stop()

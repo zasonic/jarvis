@@ -172,6 +172,11 @@ Every distinct LLM call in Jarvis, what feeds it, what consumes it, and how it i
 - **Weather** ([src/jarvis/tools/builtin/weather.py](src/jarvis/tools/builtin/weather.py), ~line 60) — `ollama_chat_model`, parses location/time/unit from the query.
 - **Nutrition log_meal** ([src/jarvis/tools/builtin/nutrition/log_meal.py](src/jarvis/tools/builtin/nutrition/log_meal.py), lines 48 & 136) — `ollama_chat_model`, extracts nutrients, confirms logging.
 
+## 15. Scheduler-triggered reply (no new LLM context)
+
+- **Trigger**: the background `TaskScheduler` ([src/jarvis/scheduling/scheduler.py](src/jarvis/scheduling/scheduler.py)) fires a stored task prompt at its scheduled time. It is an additional **entry point** into the existing reply flow (#1 and its dependents), not a new LLM call type. The scheduling tools (`scheduleTask` etc.) make **no LLM call** — the model resolves the schedule into structured numeric fields and the tool only does arithmetic.
+- **Isolation**: scheduled runs use a dedicated `DialogueMemory` so they never contaminate the live conversation's hot window. See `src/jarvis/scheduling/scheduling.spec.md`.
+
 ---
 
 ## Frequency / Size Summary

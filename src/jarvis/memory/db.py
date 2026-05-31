@@ -41,6 +41,21 @@ CREATE TABLE IF NOT EXISTS conversation_summaries (
   UNIQUE(date_utc, source_app)
 );
 
+-- Scheduled / background tasks (optional feature). Each row is a stored
+-- natural-language prompt the scheduler runs through the reply engine at
+-- next_run_utc, then either reschedules (recurring) or disables (once).
+CREATE TABLE IF NOT EXISTS scheduled_tasks (
+  id              INTEGER PRIMARY KEY,
+  created_utc     TEXT NOT NULL,
+  prompt          TEXT NOT NULL,   -- instruction fed to the reply engine
+  kind            TEXT NOT NULL,   -- 'once' | 'recurring'
+  next_run_utc    TEXT NOT NULL,   -- ISO-8601 UTC of the next firing
+  interval_seconds INTEGER,        -- recurring period; NULL for 'once'
+  last_run_utc    TEXT,            -- ISO-8601 UTC of the last firing, or NULL
+  enabled         INTEGER NOT NULL DEFAULT 1,
+  tz_name         TEXT             -- IANA zone used when scheduling (for display)
+);
+
 CREATE VIRTUAL TABLE IF NOT EXISTS summaries_fts USING fts5(
   summary,
   topics,
@@ -334,6 +349,99 @@ class Database:
         with self._lock:
             cur = self.conn.cursor()
             cur.execute("DELETE FROM meals WHERE id = ?", (meal_id,))
+            self.conn.commit()
+            return cur.rowcount > 0
+
+    # --- Scheduled Tasks API ---
+    def insert_scheduled_task(
+        self,
+        prompt: str,
+        kind: str,
+        next_run_utc: str,
+        interval_seconds: Optional[int] = None,
+        tz_name: Optional[str] = None,
+        created_utc: Optional[str] = None,
+    ) -> int:
+        """Persist a scheduled task and return its row id."""
+        created = created_utc or datetime.now(timezone.utc).isoformat()
+        with self._lock:
+            cur = self.conn.cursor()
+            cur.execute(
+                """
+                INSERT INTO scheduled_tasks(
+                  created_utc, prompt, kind, next_run_utc,
+                  interval_seconds, last_run_utc, enabled, tz_name
+                )
+                VALUES (?, ?, ?, ?, ?, NULL, 1, ?)
+                """,
+                (created, prompt, kind, next_run_utc, interval_seconds, tz_name),
+            )
+            self.conn.commit()
+            return int(cur.lastrowid)
+
+    def get_due_scheduled_tasks(self, now_utc: str) -> list[sqlite3.Row]:
+        """Enabled tasks whose next_run_utc is at or before now_utc, oldest first."""
+        with self._lock:
+            cur = self.conn.cursor()
+            return cur.execute(
+                """
+                SELECT * FROM scheduled_tasks
+                WHERE enabled = 1 AND next_run_utc <= ?
+                ORDER BY next_run_utc ASC
+                """,
+                (now_utc,),
+            ).fetchall()
+
+    def get_active_scheduled_tasks(self) -> list[sqlite3.Row]:
+        """All enabled tasks, ordered by their next firing time."""
+        with self._lock:
+            cur = self.conn.cursor()
+            return cur.execute(
+                """
+                SELECT * FROM scheduled_tasks
+                WHERE enabled = 1
+                ORDER BY next_run_utc ASC
+                """,
+            ).fetchall()
+
+    def update_scheduled_task_run(
+        self,
+        task_id: int,
+        last_run_utc: str,
+        next_run_utc: Optional[str],
+        enabled: bool,
+    ) -> None:
+        """Record a firing: stamp last_run_utc, advance next_run_utc, set enabled.
+
+        ``next_run_utc`` of ``None`` (a completed one-shot task) leaves the
+        column unchanged; ``enabled=False`` retires the row from future scans.
+        """
+        with self._lock:
+            cur = self.conn.cursor()
+            if next_run_utc is None:
+                cur.execute(
+                    "UPDATE scheduled_tasks SET last_run_utc = ?, enabled = ? WHERE id = ?",
+                    (last_run_utc, 1 if enabled else 0, task_id),
+                )
+            else:
+                cur.execute(
+                    """
+                    UPDATE scheduled_tasks
+                    SET last_run_utc = ?, next_run_utc = ?, enabled = ?
+                    WHERE id = ?
+                    """,
+                    (last_run_utc, next_run_utc, 1 if enabled else 0, task_id),
+                )
+            self.conn.commit()
+
+    def cancel_scheduled_task(self, task_id: int) -> bool:
+        """Disable a task by id. Returns True if a row was affected."""
+        with self._lock:
+            cur = self.conn.cursor()
+            cur.execute(
+                "UPDATE scheduled_tasks SET enabled = 0 WHERE id = ? AND enabled = 1",
+                (task_id,),
+            )
             self.conn.commit()
             return cur.rowcount > 0
 

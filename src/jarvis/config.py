@@ -247,6 +247,16 @@ class Settings:
     # number of network connections at once.
     planner_parallel_max: int
 
+    # Background scheduler for reminders / recurring updates / background
+    # jobs. When enabled, the daemon runs a thread that fires stored task
+    # prompts through the reply engine and speaks the result. Fully local;
+    # tasks live in the local SQLite DB. Disable to turn the feature off
+    # entirely (the scheduleTask tool still records, but nothing fires).
+    scheduler_enabled: bool
+    # How often (seconds) the scheduler wakes to check for due tasks. Also
+    # the worst-case lateness of a "fire in N minutes" task.
+    scheduler_tick_seconds: float
+
     # Location Services
     location_enabled: bool
     location_cache_minutes: int
@@ -561,6 +571,8 @@ def get_default_config() -> Dict[str, Any]:
         "planner_timeout_sec": 6.0,
         "planner_parallel_enabled": True,
         "planner_parallel_max": 4,
+        "scheduler_enabled": True,
+        "scheduler_tick_seconds": 30.0,
 
         # Stop Commands
         "stop_commands": ["stop", "quiet", "shush", "silence", "enough", "shut up"],
@@ -797,6 +809,14 @@ def load_settings() -> Settings:
     # rather than erroring.
     if planner_parallel_max < 1:
         planner_parallel_max = 1
+    scheduler_enabled = bool(merged.get("scheduler_enabled", True))
+    try:
+        scheduler_tick_seconds = float(merged.get("scheduler_tick_seconds", 30.0))
+    except (TypeError, ValueError):
+        scheduler_tick_seconds = 30.0
+    # Floor the tick so a misconfigured tiny value can't busy-spin the thread.
+    if scheduler_tick_seconds < 1.0:
+        scheduler_tick_seconds = 1.0
     try:
         tool_search_max_calls = int(merged.get("tool_search_max_calls", 3))
     except (TypeError, ValueError):
@@ -959,6 +979,8 @@ def load_settings() -> Settings:
         planner_timeout_sec=planner_timeout_sec,
         planner_parallel_enabled=planner_parallel_enabled,
         planner_parallel_max=planner_parallel_max,
+        scheduler_enabled=scheduler_enabled,
+        scheduler_tick_seconds=scheduler_tick_seconds,
 
         # Location Services
         location_enabled=location_enabled,
