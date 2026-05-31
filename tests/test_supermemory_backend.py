@@ -234,3 +234,47 @@ def test_merge_respects_max_results():
     assert sm.merge_memory_results(local, remote, max_results=2) == [
         "[2025-05-20] a", "[2025-05-19] b",
     ]
+
+
+# ── Startup validation ───────────────────────────────────────────────────────
+
+def test_startup_check_disabled_is_silent(capsys):
+    sm.startup_check(_cfg())  # disabled
+    assert capsys.readouterr().out == ""
+
+
+def test_startup_check_logs_connected(monkeypatch, capsys):
+    _install_stub(monkeypatch, _StubClient())
+    cfg = _cfg(supermemory_enabled=True, supermemory_api_key="sm_x",
+              supermemory_container_tag="sam")
+    sm.startup_check(cfg)
+    out = capsys.readouterr().out
+    assert "Supermemory connected" in out
+    assert "container: sam" in out
+
+
+def test_startup_check_warns_on_probe_failure(monkeypatch, capsys):
+    class _Raising(_StubClient):
+        def profile(self, **kw):
+            raise RuntimeError("401 unauthorized")
+
+    _install_stub(monkeypatch, _Raising())
+    cfg = _cfg(supermemory_enabled=True, supermemory_api_key="sm_bad")
+    sm.startup_check(cfg)  # must not raise
+    out = capsys.readouterr().out
+    assert "startup probe" in out and "401 unauthorized" in out
+
+
+def test_startup_check_warns_when_package_missing(monkeypatch, capsys):
+    monkeypatch.delitem(sys.modules, "supermemory", raising=False)
+    real_import = builtins.__import__
+
+    def no_supermemory(name, *args, **kwargs):
+        if name == "supermemory":
+            raise ImportError("not installed")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", no_supermemory)
+    cfg = _cfg(supermemory_enabled=True, supermemory_api_key="sm_x")
+    sm.startup_check(cfg)
+    assert "enabled but unavailable" in capsys.readouterr().out

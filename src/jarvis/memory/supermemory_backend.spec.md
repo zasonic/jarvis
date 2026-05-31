@@ -53,7 +53,13 @@ supermemory has no notion of Jarvis's tree structure or its USER/DIRECTIVES/WORL
 - the scrubbed daily summary is mirrored right after the local `upsert_conversation_summary` + embedding write;
 - each newly stored graph fact is mirrored inside the existing non-fatal graph block.
 
-Re-mirroring is safe: supermemory dedupes server-side via content hashing, and Jarvis's cumulative diary re-extracts the same facts on every flush.
+Re-mirroring is safe: each `add` carries a stable `custom_id` (`jarvis-diary-{date}` for the cumulative daily summary, a content hash for facts) so a re-mirror updates one logical document rather than accumulating partial copies. SDK versions that reject `custom_id` fall back to a plain `add`.
+
+## Startup validation
+
+Because the backend fails open, a misconfiguration (missing package, wrong key, unreachable host, or an SDK whose surface differs from what we call) would otherwise present as a silent per-turn no-op. `startup_check(cfg)` is called once from `daemon.py` startup: when enabled, it makes one bounded `profile` probe and prints either `🌐 Supermemory connected: <endpoint> (container: <tag>)` or a `⚠️` warning with the error, so the problem surfaces in the console. It never raises and never blocks longer than the client's short timeout. When disabled it is silent and makes no network call.
+
+The live smoke test `tests/test_supermemory_live.py` (skipped unless `SUPERMEMORY_API_KEY` is set) exercises the real SDK end-to-end against a throwaway container tag, which is the one thing the fail-open unit tests cannot prove.
 
 ## Privacy
 

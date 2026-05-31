@@ -315,3 +315,45 @@ def fetch_profile_facts(
     except Exception as e:
         debug_log(f"supermemory profile failed (non-fatal): {e}", "memory")
         return []
+
+
+# ── Startup validation ───────────────────────────────────────────────────────
+
+def startup_check(cfg) -> None:
+    """One-time, best-effort connectivity probe logged at daemon startup.
+
+    The whole backend fails open, which means a misconfiguration (missing
+    package, wrong key, unreachable host, or an SDK whose surface differs from
+    what we call) would otherwise present as a silent no-op: every turn quietly
+    degrades to local memory with only a debug line. When supermemory is
+    enabled we make one bounded ``profile`` probe at startup so the problem
+    surfaces loudly in the console instead. Never raises; never blocks more than
+    the client's short timeout.
+    """
+    if not is_enabled(cfg):
+        return
+    endpoint = getattr(cfg, "supermemory_base_url", "") or "https://api.supermemory.ai"
+    tag = _container_tag(cfg)
+    client = _get_client(cfg)
+    if client is None:
+        print(
+            "⚠️  Supermemory is enabled but unavailable (package not installed "
+            "or client failed to build) — using local memory only.",
+            flush=True,
+        )
+        return
+    try:
+        client.profile(container_tag=tag, q=None)
+        print(f"🌐 Supermemory connected: {endpoint} (container: {tag})", flush=True)
+    except Exception as e:
+        print(
+            f"⚠️  Supermemory is enabled but the startup probe to {endpoint} "
+            f"failed: {e}",
+            flush=True,
+        )
+        print(
+            "   Falling back to local memory. Check supermemory_api_key and "
+            "supermemory_base_url.",
+            flush=True,
+        )
+        debug_log(f"supermemory startup probe failed: {e}", "memory")
