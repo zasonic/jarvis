@@ -23,6 +23,7 @@ See ``supermemory_backend.spec.md`` for the full contract.
 """
 from __future__ import annotations
 
+import hashlib
 from datetime import datetime, timezone
 from typing import Any, List, Optional
 
@@ -171,14 +172,35 @@ def merge_memory_results(
 
 # ── Write path ───────────────────────────────────────────────────────────────
 
+def _add(client, *, content: str, container_tag: str, metadata: dict, custom_id: str) -> None:
+    """Call ``client.add`` with a stable ``custom_id``, tolerant of SDK versions.
+
+    The ``custom_id`` makes a re-mirror update one logical document instead of
+    appending a new one (the daily diary summary is cumulative and rewritten on
+    every flush, so without a stable id supermemory would accumulate many
+    partial copies). Older/newer SDKs that don't accept ``custom_id`` fall back
+    to a plain add.
+    """
+    try:
+        client.add(
+            content=content,
+            container_tag=container_tag,
+            metadata=metadata,
+            custom_id=custom_id,
+        )
+    except TypeError:
+        client.add(content=content, container_tag=container_tag, metadata=metadata)
+
+
 def mirror_diary_summary(
     cfg, summary: str, topics: Optional[str], date_utc: str
 ) -> None:
     """Best-effort mirror of a daily diary summary to supermemory.
 
     Only the already-scrubbed summary text is sent. Failures are swallowed; the
-    local diary remains the source of truth. supermemory dedupes server-side via
-    content hashing, so re-mirroring the same cumulative summary is safe.
+    local diary remains the source of truth. A stable per-day ``custom_id`` keeps
+    the cumulative summary as a single logical document instead of one entry per
+    flush.
     """
     if not is_enabled(cfg) or not summary or not summary.strip():
         return
@@ -193,10 +215,12 @@ def mirror_diary_summary(
         }
         if topics:
             metadata["topics"] = topics
-        client.add(
+        _add(
+            client,
             content=summary,
             container_tag=_container_tag(cfg),
             metadata=metadata,
+            custom_id=f"jarvis-diary-{date_utc}",
         )
         debug_log(f"supermemory: mirrored diary summary for {date_utc}", "memory")
     except Exception as e:
@@ -204,17 +228,24 @@ def mirror_diary_summary(
 
 
 def mirror_graph_fact(cfg, fact: str, node_name: str) -> None:
-    """Best-effort mirror of a single extracted graph fact to supermemory."""
+    """Best-effort mirror of a single extracted graph fact to supermemory.
+
+    A content-derived ``custom_id`` keeps re-extraction of the same fact (the
+    cumulative diary re-extracts facts on every flush) from creating duplicates.
+    """
     if not is_enabled(cfg) or not fact or not fact.strip():
         return
     client = _get_client(cfg)
     if client is None:
         return
     try:
-        client.add(
+        fact_id = hashlib.sha1(fact.strip().encode("utf-8")).hexdigest()[:16]
+        _add(
+            client,
             content=fact,
             container_tag=_container_tag(cfg),
             metadata={"type": "fact", "node": node_name or "", "source": "jarvis"},
+            custom_id=f"jarvis-fact-{fact_id}",
         )
     except Exception as e:
         debug_log(f"supermemory fact mirror failed (non-fatal): {e}", "memory")
@@ -246,7 +277,10 @@ def search_memories(cfg, query: str, max_results: int = 10) -> List[str]:
             text = _extract(r, "memory") or _extract(r, "chunk") or ""
             if not isinstance(text, str) or not text.strip():
                 continue
-            date_str = _date_prefix(_extract(r, "updatedAt"))
+            # The documented dict shape uses camelCase ("updatedAt"); a typed
+            # model shape would expose snake_case ("updated_at"). Try both.
+            updated = _extract(r, "updatedAt") or _extract(r, "updated_at")
+            date_str = _date_prefix(updated)
             out.append(f"[{date_str}] {text.strip()}")
         return out[:max_results]
     except Exception as e:

@@ -1352,7 +1352,9 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
             # (and no network) unless the user enabled supermemory with a key.
             from ..memory import supermemory_backend
             if supermemory_backend.is_enabled(cfg):
-                sm_query = " ".join(keywords) if keywords else redacted
+                # This block is already guarded by `and keywords`, so keywords
+                # is non-empty here.
+                sm_query = " ".join(keywords)
                 sm_hits = supermemory_backend.search_memories(
                     cfg, sm_query, max_results=cfg.memory_enrichment_max_results
                 )

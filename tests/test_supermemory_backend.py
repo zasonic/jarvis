@@ -42,9 +42,9 @@ class _StubClient:
         self.added = []
         self.search = SimpleNamespace(memories=self._search_memories)
 
-    def add(self, content=None, container_tag=None, metadata=None):
+    def add(self, content=None, container_tag=None, metadata=None, custom_id=None):
         self.added.append({"content": content, "container_tag": container_tag,
-                           "metadata": metadata})
+                           "metadata": metadata, "custom_id": custom_id})
 
     def _search_memories(self, q=None, container_tag=None, limit=None, **kw):
         return {"results": [
@@ -135,6 +135,43 @@ def test_write_path_mirrors_summary_and_facts(monkeypatch):
     assert diary["container_tag"] == "sam"
     assert diary["metadata"]["type"] == "diary"
     assert fact["metadata"]["type"] == "fact"
+    # Stable per-day / per-fact custom_id so re-mirrors update one document
+    # instead of accumulating duplicates.
+    assert diary["custom_id"] == "jarvis-diary-2025-05-20"
+    assert fact["custom_id"].startswith("jarvis-fact-")
+
+
+def test_add_falls_back_when_custom_id_unsupported(monkeypatch):
+    """An SDK whose add() rejects custom_id still mirrors via the plain call."""
+    class _NoCustomId:
+        def __init__(self):
+            self.added = []
+
+        def add(self, content=None, container_tag=None, metadata=None):
+            self.added.append(content)
+
+    client = _NoCustomId()
+    _install_stub(monkeypatch, client)
+    cfg = _cfg(supermemory_enabled=True, supermemory_api_key="sm_x")
+
+    sm.mirror_diary_summary(cfg, "Sam went hiking", "outdoors", "2025-05-20")
+    assert client.added == ["Sam went hiking"]
+
+
+def test_read_path_handles_model_shaped_response(monkeypatch):
+    """A typed-model response (snake_case updated_at) still yields a real date."""
+    class _ModelClient(_StubClient):
+        def _search_memories(self, q=None, container_tag=None, limit=None, **kw):
+            # Object (not dict) results exposing snake_case attributes.
+            return SimpleNamespace(results=[
+                SimpleNamespace(memory="User enjoys hiking",
+                                updated_at="2025-05-20T10:00:00Z"),
+            ])
+
+    _install_stub(monkeypatch, _ModelClient())
+    cfg = _cfg(supermemory_enabled=True, supermemory_api_key="sm_x")
+
+    assert sm.search_memories(cfg, "hiking") == ["[2025-05-20] User enjoys hiking"]
 
 
 def test_read_path_returns_diary_formatted_strings(monkeypatch):
